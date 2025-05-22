@@ -17,3 +17,4 @@ release/
 /app/docker-compose.yml
 /app/nginx/nginx.conf
 db
+.DS_Store

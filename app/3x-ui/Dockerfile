@@ -35,7 +35,6 @@ COPY --from=builder /app/build/ /app/
 COPY --from=builder /app/DockerEntrypoint.sh /app/
 COPY --from=builder /app/x-ui.sh /usr/bin/x-ui
 
-RUN mkdir -p /app/logs
 
 # Configure fail2ban
 RUN rm -f /etc/fail2ban/jail.d/alpine-ssh.conf \
@@ -47,10 +46,9 @@ RUN rm -f /etc/fail2ban/jail.d/alpine-ssh.conf \
 RUN chmod +x \
   /app/DockerEntrypoint.sh \
   /app/x-ui \
-  /usr/bin/x-ui \
-  /app/logs
+  /usr/bin/x-ui
 
-ENV X_UI_ENABLE_FAIL2BAN="true"
+ENV XUI_ENABLE_FAIL2BAN="true"
 VOLUME [ "/etc/x-ui" ]
 CMD [ "./x-ui" ]
 ENTRYPOINT [ "/app/DockerEntrypoint.sh" ]
