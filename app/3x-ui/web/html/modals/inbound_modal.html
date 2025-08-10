@@ -141,7 +141,27 @@
                 }
                 inModal.inbound.stream.reality.privateKey = msg.obj.privateKey;
                 inModal.inbound.stream.reality.settings.publicKey = msg.obj.publicKey;
-            }
+            },
+            async getNewmldsa65() {
+                inModal.loading(true);
+                const msg = await HttpUtil.post('/server/getNewmldsa65');
+                inModal.loading(false);
+                if (!msg.success) {
+                    return;
+                }
+                inModal.inbound.stream.reality.mldsa65Seed = msg.obj.seed;
+                inModal.inbound.stream.reality.settings.mldsa65Verify = msg.obj.verify;
+            },
+            async getNewEchCert() {
+                inModal.loading(true);
+                const msg = await HttpUtil.post('/server/getNewEchCert', {sni: inModal.inbound.stream.tls.sni});
+                inModal.loading(false);
+                if (!msg.success) {
+                    return;
+                }
+                inModal.inbound.stream.tls.echServerKeys = msg.obj.echServerKeys;
+                inModal.inbound.stream.tls.settings.echConfigList = msg.obj.echConfigList;
+            },
         },
     });
 
