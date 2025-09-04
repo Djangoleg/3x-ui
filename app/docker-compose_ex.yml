@@ -5,6 +5,9 @@ services:
     volumes:
       - ./3x-ui/db/:/etc/x-ui/
       - ./3x-ui/logs/:/app/logs/
+      # Address from certbot.
+      - /etc/letsencrypt/live/ADDRESS.FROM.CERTBOOT:/etc/letsencrypt/live/ADDRESS.FROM.CERTBOOT:ro
+      - /etc/letsencrypt/archive/ADDRESS.FROM.CERTBOOT:/etc/letsencrypt/archive/ADDRESS.FROM.CERTBOOT:ro
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
       XUI_ENABLE_FAIL2BAN: "true"
@@ -13,23 +16,20 @@ services:
     expose:
       # Hide standart panel and subscription port.
       - "2053:2053"
-      - "2054:2054"
     ports:
       # Inbound port.
       - XXX:XXX
+      # Subscription port.
+      - XXXXX:XXXXX
   nginx:
     build: ./nginx
     restart: always
     volumes:
       # Address from certbot.
-      - /etc/letsencrypt/archive/ADDRESS.FROM.CERTBOOT:/etc/nginx/certs/
-
       - /etc/letsencrypt/live/ADDRESS.FROM.CERTBOOT:/etc/letsencrypt/live/ADDRESS.FROM.CERTBOOT:ro
       - /etc/letsencrypt/archive/ADDRESS.FROM.CERTBOOT:/etc/letsencrypt/archive/ADDRESS.FROM.CERTBOOT:ro
     ports:
       # Panel port.
-      - XXXXX:XXXXX
-      # Subscription port.
       - XXXXX:XXXXX
     depends_on:
       - 3x-ui
