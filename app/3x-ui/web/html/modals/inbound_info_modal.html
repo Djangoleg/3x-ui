@@ -101,6 +101,12 @@
       {{ i18n "security" }}
       <a-tag :color="inbound.stream.security == 'none' ? 'red' : 'green'">[[ inbound.stream.security ]]</a-tag>
       <br />
+      <td>Authentication</td>
+        <a-tag :color="inbound.settings.selectedAuth ? 'green' : 'red'">[[ inbound.settings.selectedAuth ? inbound.settings.selectedAuth : '' ]]</a-tag>
+      <br />
+      {{ i18n "encryption" }}
+        <a-tag :color="inbound.settings.encryption ? 'green' : 'red'">[[ inbound.settings.encryption ? inbound.settings.encryption : '' ]]</a-tag>
+      <br />
       <template v-if="inbound.stream.security != 'none'">
         {{ i18n "domainName" }}
         <a-tag v-if="inbound.serverName" :color="inbound.serverName ? 'green' : 'orange'">[[ inbound.serverName ? inbound.serverName : '' ]]</a-tag>
@@ -348,7 +354,7 @@
           <code>[[ link.link ]]</code>
         </tr-info-row>
       </template>
-      <table v-if="inbound.protocol == Protocols.DOKODEMO" class="tr-info-table">
+      <table v-if="inbound.protocol == Protocols.TUNNEL" class="tr-info-table">
         <tr>
           <th>{{ i18n "pages.inbounds.targetAddress" }}</th>
           <th>{{ i18n "pages.inbounds.destinationPort" }}</th>
@@ -370,7 +376,7 @@
           </td>
         </tr>
       </table>
-      <table v-if="dbInbound.isSocks" class="tr-info-table">
+      <table v-if="dbInbound.isMixed" class="tr-info-table">
         <tr>
           <th>{{ i18n "password" }} Auth</th>
           <th>{{ i18n "pages.inbounds.enable" }} udp</th>
@@ -486,7 +492,7 @@
 </a-modal>
 <script>
   function refreshIPs(email) {
-    return HttpUtil.post(`/panel/inbound/clientIps/${email}`).then((msg) => {
+    return HttpUtil.post(`/panel/api/inbounds/clientIps/${email}`).then((msg) => {
       if (msg.success) {
         try {
           return JSON.parse(msg.obj).join(', ');
@@ -607,7 +613,7 @@
           });
       },
       clearClientIps() {
-        HttpUtil.post(`/panel/inbound/clearClientIps/${this.infoModal.clientStats.email}`)
+        HttpUtil.post(`/panel/api/inbounds/clearClientIps/${this.infoModal.clientStats.email}`)
           .then((msg) => {
             if (!msg.success) {
               return;

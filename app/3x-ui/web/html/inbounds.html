@@ -1,150 +1,8 @@
 {{ template "page/head_start" .}}
-<style>
-  .ant-table:not(.ant-table-expanded-row .ant-table) {
-    outline: 1px solid #f0f0f0;
-    outline-offset: -1px;
-    border-radius: 1rem;
-    overflow-x: hidden;
-  }
-  .dark .ant-table:not(.ant-table-expanded-row .ant-table) {
-    outline-color: var(--dark-color-table-ring);
-  }
-  .ant-table .ant-table-content .ant-table-scroll .ant-table-body {
-    overflow-y: hidden;
-  }
-  .ant-table .ant-table-content .ant-table-tbody tr:last-child .ant-table-wrapper {
-	  margin:-10px 22px !important;
-  }
-  .ant-table .ant-table-content .ant-table-tbody tr:last-child .ant-table-wrapper .ant-table {
-    border-bottom-left-radius: 1rem;
-    border-bottom-right-radius: 1rem;
-  }
-  .ant-table .ant-table-content .ant-table-tbody tr:last-child tr:last-child td {
-	  border-bottom-color: transparent;
-  }
-  .ant-table .ant-table-tbody tr:last-child.ant-table-expanded-row .ant-table-wrapper .ant-table-tbody>tr:last-child>td:first-child {
-    border-bottom-left-radius: 6px;
-  }
-  .ant-table .ant-table-tbody tr:last-child.ant-table-expanded-row .ant-table-wrapper .ant-table-tbody>tr:last-child>td:last-child {
-    border-bottom-right-radius: 6px;
-  }
-  @media (min-width: 769px) {
-    .ant-layout-content {
-      margin: 24px 16px;
-    }
-  }
-  @media (max-width: 768px) {
-    .ant-card-body {
-      padding: .5rem;
-    }
-    .ant-table .ant-table-content .ant-table-tbody tr:last-child .ant-table-wrapper {
-	    margin:-10px 2px !important;
-    }
-  }
-  .dark .ant-switch-small:not(.ant-switch-checked) {
-    background-color: var(--dark-color-surface-100) !important;
-  }
-  .ant-custom-popover-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 5px 0;
-  }
-  .ant-col-sm-24 {
-    margin: 0.5rem -2rem 0.5rem 2rem;
-  }
-  tr.hideExpandIcon .ant-table-row-expand-icon {
-    display: none;
-  }
-  .infinite-tag {
-    padding: 0 5px;
-    border-radius: 2rem;
-    min-width: 50px;
-    min-height: 22px;
-  }
-  .infinite-bar .ant-progress-inner .ant-progress-bg {
-    background-color: #F2EAF1;
-    border: #D5BED2 solid 1px;
-  }
-  .dark .infinite-bar .ant-progress-inner .ant-progress-bg {
-    background-color: #7a316f !important;
-    border: #7a316f solid 1px;
-  }
-  .ant-collapse {
-    margin: 5px 0;
-  }
-  .info-large-tag {
-    max-width: 200px;
-    overflow: hidden;
-  }
-  .client-comment {
-    font-size: 12px;
-    opacity: 0.75;
-    cursor: help;
-  }
-  .client-email {
-    font-weight: 500;
-  }
-  .client-popup-item {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .online-animation .ant-badge-status-dot {
-    animation: onlineAnimation 1.2s linear infinite;
-  }
-  @keyframes onlineAnimation {
-    0%,
-    50%,
-    100% {
-      transform: scale(1);
-      opacity: 1;
-    }
-    10% {
-      transform: scale(1.5);
-      opacity: .2;
-    }
-  }
-  .tr-table-box {
-    display: flex;
-    gap: 4px;
-    justify-content: center;
-    align-items: center;
-  }
-  .tr-table-rt {
-    flex-basis: 70px;
-    min-width: 70px;
-    text-align: end;
-  }
-  .tr-table-lt {
-    flex-basis: 70px;
-    min-width: 70px;
-    text-align: start;
-  }
-  .tr-table-bar {
-    flex-basis: 160px;
-    min-width: 60px;
-  }
-  .tr-infinity-ch {
-    font-size: 14pt;
-    max-height: 24px;
-    display: inline-flex;
-    align-items: center;
-  }
-  .ant-table-expanded-row .ant-table .ant-table-body {
-    overflow-x: hidden;
-  }
-  .ant-table-expanded-row .ant-table-tbody>tr>td {
-    padding: 10px 2px;
-  }
-  .ant-table-expanded-row .ant-table-thead>tr>th {
-    padding: 12px 2px;
-  }
-</style>
 {{ template "page/head_end" .}}
 
 {{ template "page/body_start" .}}
-<a-layout id="app" v-cloak :class="themeSwitcher.currentTheme">
+<a-layout id="app" v-cloak :class="themeSwitcher.currentTheme + ' inbounds-page'">
   <a-sidebar></a-sidebar>
   <a-layout id="content-layout">
     <a-layout-content>
@@ -706,7 +564,7 @@
     }, {
         title: '{{ i18n "pages.inbounds.enable" }}',
         align: 'center',
-        width: 30,
+        width: 35,
         scopedSlots: { customRender: 'enable' },
     }, {
         title: '{{ i18n "pages.inbounds.remark" }}',
@@ -770,8 +628,8 @@
 
     const innerColumns = [
         { title: '{{ i18n "pages.inbounds.operate" }}', width: 65, scopedSlots: { customRender: 'actions' } },
-        { title: '{{ i18n "pages.inbounds.enable" }}', width: 30, scopedSlots: { customRender: 'enable' } },
-        { title: '{{ i18n "online" }}', width: 30, scopedSlots: { customRender: 'online' } },
+        { title: '{{ i18n "pages.inbounds.enable" }}', width: 35, scopedSlots: { customRender: 'enable' } },
+        { title: '{{ i18n "online" }}', width: 32, scopedSlots: { customRender: 'online' } },
         { title: '{{ i18n "pages.inbounds.client" }}', width: 80, scopedSlots: { customRender: 'client' } },
         { title: '{{ i18n "pages.inbounds.traffic" }}', width: 80, align: 'center', scopedSlots: { customRender: 'traffic' } },
         { title: '{{ i18n "pages.inbounds.allTimeTraffic" }}', width: 80, align: 'center', scopedSlots: { customRender: 'allTime' } },
@@ -830,7 +688,7 @@
             },
             async getDBInbounds() {
                 this.refreshing = true;
-                const msg = await HttpUtil.post('/panel/inbound/list');
+                const msg = await HttpUtil.get('/panel/api/inbounds/list');
                 if (!msg.success) {
                     this.refreshing = false;
                     return;
@@ -845,7 +703,7 @@
                 }, 500);
             },
             async getOnlineUsers() {
-                const msg = await HttpUtil.post('/panel/inbound/onlines');
+                const msg = await HttpUtil.post('/panel/api/inbounds/onlines');
                 if (!msg.success) {
                     return;
                 }
@@ -983,11 +841,13 @@
                             const list = this.clientCount[inbound.id][this.filterBy];
                             if (list.length > 0) {
                                 const filteredSettings = { "clients": [] };
-                                inboundSettings.clients.forEach(client => {
-                                    if (list.includes(client.email)) {
-                                        filteredSettings.clients.push(client);
-                                    }
-                                });
+                                if (inboundSettings.clients) {
+                                    inboundSettings.clients.forEach(client => {
+                                        if (list.includes(client.email)) {
+                                            filteredSettings.clients.push(client);
+                                        }
+                                    });
+                                }
                                 newInbound.settings = Inbound.Settings.fromJson(inbound.protocol, filteredSettings);
                                 this.searchedInbounds.push(newInbound);
                             }
@@ -1099,7 +959,7 @@
                     streamSettings: baseInbound.stream.toString(),
                     sniffing: baseInbound.sniffing.toString(),
                 };
-                await this.submit('/panel/inbound/add', data, inModal);
+                await this.submit('/panel/api/inbounds/add', data, inModal);
             },
             openAddInbound() {
                 inModal.show({
@@ -1148,7 +1008,7 @@
                 }
                 data.sniffing = inbound.sniffing.toString();
 
-                await this.submit('/panel/inbound/add', data, inModal);
+                await this.submit('/panel/api/inbounds/add', data, inModal);
             },
             async updateInbound(inbound, dbInbound) {
                 const data = {
@@ -1171,7 +1031,7 @@
                 }
                 data.sniffing = inbound.sniffing.toString();
 
-                await this.submit(`/panel/inbound/update/${dbInbound.id}`, data, inModal);
+                await this.submit(`/panel/api/inbounds/update/${dbInbound.id}`, data, inModal);
             },
             openAddClient(dbInboundId) {
                 dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
@@ -1226,14 +1086,14 @@
                     id: dbInboundId,
                     settings: '{"clients": [' + clients.toString() + ']}',
                 };
-                await this.submit(`/panel/inbound/addClient`, data, modal);
+                await this.submit(`/panel/api/inbounds/addClient`, data, modal);
             },
             async updateClient(client, dbInboundId, clientId) {
                 const data = {
                     id: dbInboundId,
                     settings: '{"clients": [' + client.toString() + ']}',
                 };
-                await this.submit(`/panel/inbound/updateClient/${clientId}`, data, clientModal);
+                await this.submit(`/panel/api/inbounds/updateClient/${clientId}`, data, clientModal);
             },
             resetTraffic(dbInboundId) {
                 dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
@@ -1258,7 +1118,7 @@
                     class: themeSwitcher.currentTheme,
                     okText: '{{ i18n "delete"}}',
                     cancelText: '{{ i18n "cancel"}}',
-                    onOk: () => this.submit('/panel/inbound/del/' + dbInboundId),
+                    onOk: () => this.submit('/panel/api/inbounds/del/' + dbInboundId),
                 });
             },
             delClient(dbInboundId, client,confirmation = true) {
@@ -1271,10 +1131,10 @@
                         class: themeSwitcher.currentTheme,
                         okText: '{{ i18n "delete"}}',
                         cancelText: '{{ i18n "cancel"}}',
-                        onOk: () => this.submit(`/panel/inbound/${dbInboundId}/delClient/${clientId}`),
+                        onOk: () => this.submit(`/panel/api/inbounds/${dbInboundId}/delClient/${clientId}`),
                     });
                 } else {
-                    this.submit(`/panel/inbound/${dbInboundId}/delClient/${clientId}`);
+                    this.submit(`/panel/api/inbounds/${dbInboundId}/delClient/${clientId}`);
                 }
             },
             getSubGroupClients(dbInbounds, currentClient) {
@@ -1353,7 +1213,7 @@
             switchEnable(dbInboundId,state) {
               dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
               dbInbound.enable = state;
-              this.submit(`/panel/inbound/update/${dbInboundId}`, dbInbound);
+              this.submit(`/panel/api/inbounds/update/${dbInboundId}`, dbInbound);
             },
             async switchEnableClient(dbInboundId, client) {
                 this.loading()
@@ -1383,10 +1243,10 @@
                         class: themeSwitcher.currentTheme,
                         okText: '{{ i18n "reset"}}',
                         cancelText: '{{ i18n "cancel"}}',
-                        onOk: () => this.submit('/panel/inbound/' + dbInboundId + '/resetClientTraffic/' + client.email),
+                        onOk: () => this.submit('/panel/api/inbounds/' + dbInboundId + '/resetClientTraffic/' + client.email),
                     })
                 } else {
-                    this.submit('/panel/inbound/' + dbInboundId + '/resetClientTraffic/' + client.email);
+                    this.submit('/panel/api/inbounds/' + dbInboundId + '/resetClientTraffic/' + client.email);
                 }
             },
             resetAllTraffic() {
@@ -1396,7 +1256,7 @@
                     class: themeSwitcher.currentTheme,
                     okText: '{{ i18n "reset"}}',
                     cancelText: '{{ i18n "cancel"}}',
-                    onOk: () => this.submit('/panel/inbound/resetAllTraffics'),
+                    onOk: () => this.submit('/panel/api/inbounds/resetAllTraffics'),
                 });
             },
             resetAllClientTraffics(dbInboundId) {
@@ -1406,7 +1266,7 @@
                     class: themeSwitcher.currentTheme,
                     okText: '{{ i18n "reset"}}',
                     cancelText: '{{ i18n "cancel"}}',
-                    onOk: () => this.submit('/panel/inbound/resetAllClientTraffics/' + dbInboundId),
+                    onOk: () => this.submit('/panel/api/inbounds/resetAllClientTraffics/' + dbInboundId),
                 })
             },
             delDepletedClients(dbInboundId) {
@@ -1416,7 +1276,7 @@
                     class: themeSwitcher.currentTheme,
                     okText: '{{ i18n "delete"}}',
                     cancelText: '{{ i18n "cancel"}}',
-                    onOk: () => this.submit('/panel/inbound/delDepletedClients/' + dbInboundId),
+                    onOk: () => this.submit('/panel/api/inbounds/delDepletedClients/' + dbInboundId),
                 })
             },
             isExpiry(dbInbound, index) {
@@ -1542,7 +1402,7 @@
                     value: '',
                     okText: '{{ i18n "pages.inbounds.import" }}',
                     confirm: async (dbInboundText) => {
-                        await this.submit('/panel/inbound/import', {data: dbInboundText}, promptModal);
+                        await this.submit('/panel/api/inbounds/import', {data: dbInboundText}, promptModal);
                     },
                 });
             },
