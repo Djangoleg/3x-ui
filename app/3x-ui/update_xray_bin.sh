@@ -28,7 +28,7 @@ esac
 mkdir -p bin
 cd bin
 find . ! -name 'config.json' -type f -exec rm -f {} +
-wget -q "https://github.com/XTLS/Xray-core/releases/download/v25.9.11/Xray-macos-${ARCH}.zip"
+wget -q "https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-macos-${ARCH}.zip"
 unzip "Xray-macos-${ARCH}.zip"
 rm -f "Xray-macos-${ARCH}.zip" geoip.dat geosite.dat
 mv xray "xray-darwin-${FNAME}"
