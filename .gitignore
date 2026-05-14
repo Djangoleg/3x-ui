@@ -19,3 +19,6 @@ release/
 /app/nginx/nginx.conf
 db
 .DS_Store
+node_modules/
+.vite/
+*.log
