@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
-import vue from '@vitejs/plugin-vue';
+import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -9,26 +9,20 @@ const BACKEND_TARGET = 'http://localhost:2053';
 
 function resolveDBPath() {
   const envFolder = process.env.XUI_DB_FOLDER;
-  if (envFolder) return path.join(envFolder, 'x-ui.db');
+  if (envFolder) {
+    const abs = path.isAbsolute(envFolder)
+      ? envFolder
+      : path.resolve(__dirname, '..', envFolder);
+    return path.join(abs, 'x-ui.db');
+  }
+  const repoSubDB = path.resolve(__dirname, '..', 'x-ui', 'x-ui.db');
+  if (fs.existsSync(repoSubDB)) return repoSubDB;
   const repoDB = path.resolve(__dirname, '..', 'x-ui.db');
   if (fs.existsSync(repoDB)) return repoDB;
   return '/etc/x-ui/x-ui.db';
 }
 
-const BASE_MIGRATED_ROUTES = {
-  'panel': '/index.html',
-  'panel/': '/index.html',
-  'panel/settings': '/settings.html',
-  'panel/settings/': '/settings.html',
-  'panel/inbounds': '/inbounds.html',
-  'panel/inbounds/': '/inbounds.html',
-  'panel/xray': '/xray.html',
-  'panel/xray/': '/xray.html',
-  'panel/nodes': '/nodes.html',
-  'panel/nodes/': '/nodes.html',
-  'panel/api-docs': '/api-docs.html',
-  'panel/api-docs/': '/api-docs.html',
-};
+const PANEL_API_PREFIXES = ['panel/api/', 'panel/setting/', 'panel/xray/', 'panel/csrf-token'];
 
 let cachedBasePath = '/';
 
@@ -58,8 +52,17 @@ function refreshBasePath() {
   return cachedBasePath;
 }
 
+function readPanelVersion() {
+  try {
+    const versionFile = path.resolve(__dirname, '..', 'config', 'version');
+    return fs.readFileSync(versionFile, 'utf8').trim();
+  } catch (_e) {
+    return '';
+  }
+}
+
 // `apply: 'serve'` keeps the injection out of `vite build` — dist.go
-// already injects webBasePath at runtime in production.
+// already injects webBasePath and version at runtime in production.
 function injectBasePathPlugin() {
   return {
     name: 'xui-inject-base-path',
@@ -67,8 +70,48 @@ function injectBasePathPlugin() {
     transformIndexHtml(html) {
       const basePath = refreshBasePath();
       const escaped = basePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      const tag = `<script>window.X_UI_BASE_PATH="${escaped}";</script>`;
+      const version = readPanelVersion().replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const tag = `<script>window.X_UI_BASE_PATH="${escaped}";window.X_UI_CUR_VER="${version}";</script>`;
       return html.replace('</head>', `${tag}</head>`);
+    },
+  };
+}
+
+// es-toolkit's `./compat/*` exports map only declares a CJS condition, so deep
+// imports like `es-toolkit/compat/get` resolve to a CJS shim. That shim uses a
+// `require_X.Y` pattern that Vite's optimizer and Rolldown both mishandle
+// (TypeError: require_isUnsafeProperty is not a function). The ESM build at
+// `dist/compat/<category>/<name>.mjs` is fine but only carries a named export,
+// while consumers like recharts use default imports — so emit a virtual module
+// that re-exports the named symbol as default.
+const ES_TOOLKIT_COMPAT_DIRS = ['array', 'function', 'math', 'object', 'predicate', 'string', 'util'];
+const ES_TOOLKIT_SHIM_PREFIX = '\0es-toolkit-compat:';
+
+function findEsToolkitCompatMjs(name) {
+  for (const sub of ES_TOOLKIT_COMPAT_DIRS) {
+    const candidate = path.resolve(__dirname, 'node_modules/es-toolkit/dist/compat', sub, `${name}.mjs`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function esToolkitCompatEsmResolver() {
+  return {
+    name: 'es-toolkit-compat-esm',
+    enforce: 'pre',
+    resolveId(id) {
+      const m = id.match(/^es-toolkit\/compat\/(.+)$/);
+      if (!m) return null;
+      if (!findEsToolkitCompatMjs(m[1])) return null;
+      return ES_TOOLKIT_SHIM_PREFIX + m[1];
+    },
+    load(id) {
+      if (!id.startsWith(ES_TOOLKIT_SHIM_PREFIX)) return null;
+      const name = id.slice(ES_TOOLKIT_SHIM_PREFIX.length);
+      const target = findEsToolkitCompatMjs(name);
+      if (!target) return null;
+      const url = target.replace(/\\/g, '/');
+      return `import { ${name} } from ${JSON.stringify(url)};\nexport { ${name} };\nexport default ${name};\n`;
     },
   };
 }
@@ -76,19 +119,23 @@ function injectBasePathPlugin() {
 function bypassMigratedRoute(req) {
   if (req.method !== 'GET') return undefined;
   const url = req.url.split('?')[0];
+  const basePath = refreshBasePath();
 
-  for (const [key, value] of Object.entries(BASE_MIGRATED_ROUTES)) {
-    if (url === '/' + key) return value;
+  if (url === basePath) return '/login.html';
+
+  if (url.startsWith(basePath)) {
+    const stripped = url.slice(basePath.length);
+    for (const prefix of PANEL_API_PREFIXES) {
+      if (prefix.endsWith('/')) {
+        if (stripped.startsWith(prefix)) return undefined;
+      } else if (stripped === prefix || stripped.startsWith(prefix + '/')) {
+        return undefined;
+      }
+    }
+    if (stripped === 'panel' || stripped === 'panel/' || stripped.startsWith('panel/')) {
+      return '/index.html';
+    }
   }
-
-  const m = url.match(/^\/[^/]+\/(.+)$/);
-  if (m) {
-    const stripped = m[1];
-    if (stripped in BASE_MIGRATED_ROUTES) return BASE_MIGRATED_ROUTES[stripped];
-  }
-
-  if (url === '/' || /^\/[^/]+\/$/.test(url)) return '/login.html';
-
   return undefined;
 }
 
@@ -132,10 +179,25 @@ function makeBackendProxy(target) {
 }
 
 export default defineConfig({
-  plugins: [vue(), injectBasePathPlugin()],
+  plugins: [esToolkitCompatEsmResolver(), react(), injectBasePathPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, 'src'),
+    },
+  },
+  optimizeDeps: {
+    rolldownOptions: {
+      plugins: [esToolkitCompatEsmResolver()],
+    },
+  },
+  experimental: {
+    renderBuiltUrl(filename, { hostType }) {
+      if (hostType === 'js') {
+        return {
+          runtime: `((window.X_UI_BASE_PATH||'/')+${JSON.stringify(filename)})`,
+        };
+      }
+      return undefined;
     },
   },
   build: {
@@ -148,31 +210,52 @@ export default defineConfig({
       input: {
         index: path.resolve(__dirname, 'index.html'),
         login: path.resolve(__dirname, 'login.html'),
-        settings: path.resolve(__dirname, 'settings.html'),
-        inbounds: path.resolve(__dirname, 'inbounds.html'),
-        xray: path.resolve(__dirname, 'xray.html'),
-        nodes: path.resolve(__dirname, 'nodes.html'),
-        apiDocs: path.resolve(__dirname, 'api-docs.html'),
         subpage: path.resolve(__dirname, 'subpage.html'),
       },
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined;
-          if (id.includes('ant-design-vue')) return 'vendor-antd';
-          if (id.includes('@ant-design/icons-vue')) return 'vendor-icons';
-          if (id.includes('vue-i18n')) return 'vendor-i18n';
+          if (id.includes('/node_modules/antd/')) return 'vendor-antd';
+          if (id.includes('/@ant-design/icons/') || id.includes('/@ant-design/icons-svg/')) return 'vendor-icons';
           if (
-            id.includes('/node_modules/vue/')
-            || id.includes('/node_modules/@vue/')
-          ) return 'vendor-vue';
+            id.includes('/node_modules/@rc-component/')
+            || id.includes('/node_modules/rc-')
+            || id.includes('/@ant-design/cssinjs')
+            || id.includes('/@ant-design/colors')
+            || id.includes('/@ant-design/fast-color')
+            || id.includes('/@ant-design/react-slick')
+            || id.includes('/@ctrl/tinycolor')
+          ) return 'vendor-antd';
+          if (
+            id.includes('/node_modules/react-i18next/')
+            || id.includes('/node_modules/i18next/')
+          ) return 'vendor-i18next';
+          if (
+            id.includes('/node_modules/react/')
+            || id.includes('/node_modules/react-dom/')
+            || id.includes('/node_modules/scheduler/')
+          ) return 'vendor-react';
+          if (
+            id.includes('/node_modules/codemirror/')
+            || id.includes('/node_modules/@codemirror/')
+            || id.includes('/node_modules/@lezer/')
+          ) return 'vendor-codemirror';
+          if (id.includes('/node_modules/persian-calendar-suite/')) return 'vendor-jalali';
+          if (id.includes('/node_modules/otpauth/')) return 'vendor-otpauth';
+          if (id.includes('/node_modules/@tanstack/')) return 'vendor-tanstack';
+          if (id.includes('/node_modules/react-router')) return 'vendor-router';
+          if (
+            id.includes('/node_modules/swagger-ui-react/')
+            || id.includes('/node_modules/swagger-ui/')
+            || id.includes('/node_modules/swagger-client/')
+          ) return 'vendor-swagger';
+          if (
+            id.includes('/node_modules/recharts/')
+            || id.includes('/node_modules/victory-vendor/')
+            || id.includes('/node_modules/d3-')
+          ) return 'vendor-recharts';
           if (id.includes('dayjs')) return 'vendor-dayjs';
           if (id.includes('axios')) return 'vendor-axios';
-          if (
-            id.includes('vue3-persian-datetime-picker')
-            || id.includes('moment-jalaali')
-            || id.includes('jalaali-js')
-            || id.includes('/node_modules/moment/')
-          ) return 'vendor-jalali';
           return 'vendor';
         },
       },

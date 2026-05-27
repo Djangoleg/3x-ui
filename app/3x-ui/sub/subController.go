@@ -15,6 +15,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// writeSubError translates a service-layer result into an HTTP response.
+// A nil error with no rows means the subId doesn't match anything (deleted
+// client, never-existed id) and becomes 404. A real error becomes 500. No
+// body — VPN clients only look at the status.
+func writeSubError(c *gin.Context, err error) {
+	if err == nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Status(http.StatusInternalServerError)
+}
+
 // SUBController handles HTTP requests for subscription links and JSON configurations.
 type SUBController struct {
 	subTitle         string
@@ -103,9 +115,9 @@ func (a *SUBController) initRouter(g *gin.RouterGroup) {
 func (a *SUBController) subs(c *gin.Context) {
 	subId := c.Param("subid")
 	scheme, host, hostWithPort, hostHeader := a.subService.ResolveRequest(c)
-	subs, lastOnline, traffic, err := a.subService.GetSubs(subId, host)
+	subs, emails, lastOnline, traffic, err := a.subService.GetSubs(subId, host)
 	if err != nil || len(subs) == 0 {
-		c.String(400, "Error!")
+		writeSubError(c, err)
 	} else {
 		result := ""
 		for _, sub := range subs {
@@ -127,7 +139,7 @@ func (a *SUBController) subs(c *gin.Context) {
 				basePath = "/"
 			}
 			basePathStr := basePath.(string)
-			page := a.subService.BuildPageData(subId, hostHeader, traffic, lastOnline, subs, subURL, subJsonURL, subClashURL, basePathStr, a.subTitle, a.subSupportUrl)
+			page := a.subService.BuildPageData(subId, hostHeader, traffic, lastOnline, subs, emails, subURL, subJsonURL, subClashURL, basePathStr, a.subTitle, a.subSupportUrl)
 			a.serveSubPage(c, basePathStr, page)
 			return
 		}
@@ -176,9 +188,6 @@ func (a *SUBController) serveSubPage(c *gin.Context, basePath string, page PageD
 	}
 
 	// JSON-marshal the view-model so the SPA can read it as a plain
-	// object on mount. PageData fields are already in the shape the Vue
-	// component expects, plus a `links` array carrying the rendered
-	// share URLs.
 	// The panel's "Calendar Type" setting decides whether the SubPage
 	// renders dates in Gregorian or Jalali — surface it here so the SPA
 	// can match the rest of the panel without a round-trip.
@@ -204,6 +213,7 @@ func (a *SUBController) serveSubPage(c *gin.Context, basePath string, page PageD
 		"subJsonUrl":   page.SubJsonUrl,
 		"subClashUrl":  page.SubClashUrl,
 		"links":        page.Result,
+		"emails":       page.Emails,
 		"datepicker":   datepicker,
 	}
 	subDataJSON, err := json.Marshal(subData)
@@ -240,7 +250,7 @@ func (a *SUBController) subJsons(c *gin.Context) {
 	scheme, host, hostWithPort, _ := a.subService.ResolveRequest(c)
 	jsonSub, header, err := a.subJsonService.GetJson(subId, host)
 	if err != nil || len(jsonSub) == 0 {
-		c.String(400, "Error!")
+		writeSubError(c, err)
 	} else {
 		profileUrl := a.subProfileUrl
 		if profileUrl == "" {
@@ -257,7 +267,7 @@ func (a *SUBController) subClashs(c *gin.Context) {
 	scheme, host, hostWithPort, _ := a.subService.ResolveRequest(c)
 	clashSub, header, err := a.subClashService.GetClash(subId, host)
 	if err != nil || len(clashSub) == 0 {
-		c.String(400, "Error!")
+		writeSubError(c, err)
 	} else {
 		profileUrl := a.subProfileUrl
 		if profileUrl == "" {

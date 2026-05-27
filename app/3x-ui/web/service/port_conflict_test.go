@@ -2,6 +2,7 @@ package service
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -56,7 +57,8 @@ func seedInboundConflictNode(t *testing.T, tag, listen string, port int, protoco
 	}
 }
 
-func intPtr(v int) *int { return &v }
+//go:fix inline
+func intPtr(v int) *int { return new(v) }
 
 func TestInboundTransports(t *testing.T) {
 	cases := []struct {
@@ -76,7 +78,6 @@ func TestInboundTransports(t *testing.T) {
 		{"trojan grpc is tcp", model.Trojan, `{"network":"grpc"}`, ``, transportTCP},
 
 		{"hysteria forced udp", model.Hysteria, `{"network":"tcp"}`, ``, transportUDP},
-		{"hysteria2 forced udp", model.Hysteria2, ``, ``, transportUDP},
 		{"wireguard forced udp", model.WireGuard, ``, ``, transportUDP},
 
 		{"shadowsocks tcp,udp", model.Shadowsocks, ``, `{"network":"tcp,udp"}`, transportTCP | transportUDP},
@@ -121,7 +122,7 @@ func TestListenOverlaps(t *testing.T) {
 }
 
 // the actual case from #4103: tcp/443 vless reality and udp/443
-// hysteria2 must be allowed to coexist on the same port.
+// hysteria must be allowed to coexist on the same port.
 func TestCheckPortConflict_TCPandUDPCoexistOnSamePort(t *testing.T) {
 	setupConflictDB(t)
 	seedInboundConflict(t, "vless-443-tcp", "0.0.0.0", 443, model.VLESS, `{"network":"tcp"}`, `{}`)
@@ -131,13 +132,13 @@ func TestCheckPortConflict_TCPandUDPCoexistOnSamePort(t *testing.T) {
 		Tag:      "hyst2-443-udp",
 		Listen:   "0.0.0.0",
 		Port:     443,
-		Protocol: model.Hysteria2,
+		Protocol: model.Hysteria,
 	}
 	exist, err := svc.checkPortConflict(hyst2, 0)
 	if err != nil {
 		t.Fatalf("checkPortConflict: %v", err)
 	}
-	if exist {
+	if exist != nil {
 		t.Fatalf("vless/tcp and hysteria2/udp on the same port must be allowed to coexist")
 	}
 }
@@ -159,7 +160,7 @@ func TestCheckPortConflict_TCPCollidesWithTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkPortConflict: %v", err)
 	}
-	if !exist {
+	if exist == nil {
 		t.Fatalf("two tcp inbounds on the same port must still conflict")
 	}
 }
@@ -168,7 +169,7 @@ func TestCheckPortConflict_TCPCollidesWithTCP(t *testing.T) {
 // conflict, since they fight for the same socket.
 func TestCheckPortConflict_UDPCollidesWithUDP(t *testing.T) {
 	setupConflictDB(t)
-	seedInboundConflict(t, "hyst2-443", "0.0.0.0", 443, model.Hysteria2, ``, ``)
+	seedInboundConflict(t, "hyst2-443", "0.0.0.0", 443, model.Hysteria, ``, ``)
 
 	svc := &InboundService{}
 	wg := &model.Inbound{
@@ -181,7 +182,7 @@ func TestCheckPortConflict_UDPCollidesWithUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkPortConflict: %v", err)
 	}
-	if !exist {
+	if exist == nil {
 		t.Fatalf("two udp inbounds on the same port must conflict")
 	}
 }
@@ -201,7 +202,7 @@ func TestCheckPortConflict_ShadowsocksDualListenBlocksBoth(t *testing.T) {
 		Protocol:       model.VLESS,
 		StreamSettings: `{"network":"tcp"}`,
 	}
-	if exist, err := svc.checkPortConflict(tcpClash, 0); err != nil || !exist {
+	if exist, err := svc.checkPortConflict(tcpClash, 0); err != nil || exist == nil {
 		t.Fatalf("tcp inbound should clash with shadowsocks tcp,udp; exist=%v err=%v", exist, err)
 	}
 
@@ -209,9 +210,9 @@ func TestCheckPortConflict_ShadowsocksDualListenBlocksBoth(t *testing.T) {
 		Tag:      "hyst2-443",
 		Listen:   "0.0.0.0",
 		Port:     443,
-		Protocol: model.Hysteria2,
+		Protocol: model.Hysteria,
 	}
-	if exist, err := svc.checkPortConflict(udpClash, 0); err != nil || !exist {
+	if exist, err := svc.checkPortConflict(udpClash, 0); err != nil || exist == nil {
 		t.Fatalf("udp inbound should clash with shadowsocks tcp,udp; exist=%v err=%v", exist, err)
 	}
 }
@@ -229,7 +230,7 @@ func TestCheckPortConflict_DifferentPortNeverConflicts(t *testing.T) {
 		Protocol:       model.VLESS,
 		StreamSettings: `{"network":"tcp"}`,
 	}
-	if exist, err := svc.checkPortConflict(other, 0); err != nil || exist {
+	if exist, err := svc.checkPortConflict(other, 0); err != nil || exist != nil {
 		t.Fatalf("different port must not conflict; exist=%v err=%v", exist, err)
 	}
 }
@@ -251,7 +252,7 @@ func TestCheckPortConflict_ListenOverlapPreserved(t *testing.T) {
 		Protocol:       model.VLESS,
 		StreamSettings: `{"network":"tcp"}`,
 	}
-	if exist, err := svc.checkPortConflict(other, 0); err != nil || exist {
+	if exist, err := svc.checkPortConflict(other, 0); err != nil || exist != nil {
 		t.Fatalf("different specific listen must not conflict; exist=%v err=%v", exist, err)
 	}
 
@@ -263,7 +264,7 @@ func TestCheckPortConflict_ListenOverlapPreserved(t *testing.T) {
 		Protocol:       model.VLESS,
 		StreamSettings: `{"network":"tcp"}`,
 	}
-	if exist, err := svc.checkPortConflict(anyAddr, 0); err != nil || !exist {
+	if exist, err := svc.checkPortConflict(anyAddr, 0); err != nil || exist == nil {
 		t.Fatalf("any-addr on same port+transport must conflict with specific; exist=%v err=%v", exist, err)
 	}
 }
@@ -280,7 +281,7 @@ func TestGenerateInboundTag_DisambiguatesByTransportOnSamePort(t *testing.T) {
 	udp := &model.Inbound{
 		Listen:   "0.0.0.0",
 		Port:     443,
-		Protocol: model.Hysteria2,
+		Protocol: model.Hysteria,
 	}
 	got, err := svc.generateInboundTag(udp, 0)
 	if err != nil {
@@ -342,7 +343,7 @@ func TestGenerateInboundTag_SpecificListenSameDisambiguation(t *testing.T) {
 	udp := &model.Inbound{
 		Listen:   "1.2.3.4",
 		Port:     443,
-		Protocol: model.Hysteria2,
+		Protocol: model.Hysteria,
 	}
 	got, err := svc.generateInboundTag(udp, 0)
 	if err != nil {
@@ -360,7 +361,7 @@ func TestGenerateInboundTag_SpecificListenSameDisambiguation(t *testing.T) {
 func TestCheckPortConflict_NodeScope(t *testing.T) {
 	setupConflictDB(t)
 	seedInboundConflictNode(t, "local-443-tcp", "0.0.0.0", 443, model.VLESS, `{"network":"tcp"}`, `{}`, nil)
-	seedInboundConflictNode(t, "node1-443-tcp", "0.0.0.0", 443, model.VLESS, `{"network":"tcp"}`, `{}`, intPtr(1))
+	seedInboundConflictNode(t, "node1-443-tcp", "0.0.0.0", 443, model.VLESS, `{"network":"tcp"}`, `{}`, new(1))
 
 	svc := &InboundService{}
 
@@ -370,8 +371,8 @@ func TestCheckPortConflict_NodeScope(t *testing.T) {
 		want   bool
 	}{
 		{"new local same port + tcp clashes with local", nil, true},
-		{"new remote on different node from local is fine", intPtr(2), false},
-		{"new remote on existing node 1 clashes", intPtr(1), true},
+		{"new remote on different node from local is fine", new(2), false},
+		{"new remote on existing node 1 clashes", new(1), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -386,8 +387,8 @@ func TestCheckPortConflict_NodeScope(t *testing.T) {
 			if err != nil {
 				t.Fatalf("checkPortConflict: %v", err)
 			}
-			if got != c.want {
-				t.Fatalf("got conflict=%v, want %v", got, c.want)
+			if (got != nil) != c.want {
+				t.Fatalf("got conflict=%v, want %v", got != nil, c.want)
 			}
 		})
 	}
@@ -402,7 +403,7 @@ func TestCheckPortConflict_NodeScope(t *testing.T) {
 func TestResolveInboundTag_RespectsCallerTagWhenFree(t *testing.T) {
 	setupConflictDB(t)
 	seedInboundConflictNode(t, "inbound-5000", "0.0.0.0", 5000, model.VLESS, `{"network":"tcp"}`, `{}`, nil)
-	seedInboundConflictNode(t, "inbound-5000-udp", "0.0.0.0", 5000, model.Hysteria2, ``, ``, nil)
+	seedInboundConflictNode(t, "inbound-5000-udp", "0.0.0.0", 5000, model.Hysteria, ``, ``, nil)
 
 	svc := &InboundService{}
 	pushed := &model.Inbound{
@@ -457,7 +458,7 @@ func TestResolveInboundTag_RegeneratesOnCollision(t *testing.T) {
 		Tag:            "inbound-5000-tcp",
 		Listen:         "0.0.0.0",
 		Port:           5000,
-		Protocol:       model.Hysteria2,
+		Protocol:       model.Hysteria,
 		StreamSettings: ``,
 		Settings:       ``,
 	}
@@ -482,7 +483,113 @@ func TestCheckPortConflict_IgnoreSelfOnUpdate(t *testing.T) {
 	}
 
 	svc := &InboundService{}
-	if exist, err := svc.checkPortConflict(&existing, existing.Id); err != nil || exist {
+	if exist, err := svc.checkPortConflict(&existing, existing.Id); err != nil || exist != nil {
 		t.Fatalf("self-update must not be flagged as conflict; exist=%v err=%v", exist, err)
+	}
+}
+
+// streamSettings.network=quic rides on UDP at L4, so a QUIC inbound must
+// conflict with a UDP-only neighbour (hysteria) on the same port but not
+// with a TCP-only one. covers the gap left by the original kcp-only check.
+func TestCheckPortConflict_QUICTreatedAsUDP(t *testing.T) {
+	quic := &model.Inbound{
+		Tag:            "vless-quic-443",
+		Listen:         "0.0.0.0",
+		Port:           443,
+		Protocol:       model.VLESS,
+		StreamSettings: `{"network":"quic"}`,
+	}
+
+	t.Run("conflicts with hysteria/udp", func(t *testing.T) {
+		setupConflictDB(t)
+		seedInboundConflict(t, "hyst-443", "0.0.0.0", 443, model.Hysteria, ``, ``)
+		svc := &InboundService{}
+		if exist, err := svc.checkPortConflict(quic, 0); err != nil || exist == nil {
+			t.Fatalf("quic on same port as hysteria must conflict; exist=%v err=%v", exist, err)
+		}
+	})
+
+	t.Run("coexists with vless/tcp", func(t *testing.T) {
+		setupConflictDB(t)
+		seedInboundConflict(t, "vless-tcp-443", "0.0.0.0", 443, model.VLESS, `{"network":"tcp"}`, `{}`)
+		svc := &InboundService{}
+		if exist, err := svc.checkPortConflict(quic, 0); err != nil || exist != nil {
+			t.Fatalf("quic and tcp on same port must coexist; exist=%v err=%v", exist, err)
+		}
+	})
+}
+
+// tunnel (dokodemo-door) carries its L4 transport list in
+// settings.allowedNetwork, not settings.network. verify the predicate
+// picks the right field for each protocol.
+func TestCheckPortConflict_TunnelAllowedNetwork(t *testing.T) {
+	setupConflictDB(t)
+	seedInboundConflict(t, "tunnel-udp-443", "0.0.0.0", 443, model.Tunnel, ``, `{"allowedNetwork":"udp"}`)
+
+	svc := &InboundService{}
+
+	// tcp inbound on same port should coexist with udp-only tunnel.
+	tcpNeighbour := &model.Inbound{
+		Tag:            "vless-443",
+		Listen:         "0.0.0.0",
+		Port:           443,
+		Protocol:       model.VLESS,
+		StreamSettings: `{"network":"tcp"}`,
+	}
+	if exist, err := svc.checkPortConflict(tcpNeighbour, 0); err != nil || exist != nil {
+		t.Fatalf("tunnel/udp and vless/tcp on same port must coexist; exist=%v err=%v", exist, err)
+	}
+
+	// udp neighbour (hysteria) on same port must conflict.
+	udpNeighbour := &model.Inbound{
+		Tag:      "hyst-443",
+		Listen:   "0.0.0.0",
+		Port:     443,
+		Protocol: model.Hysteria,
+	}
+	if exist, err := svc.checkPortConflict(udpNeighbour, 0); err != nil || exist == nil {
+		t.Fatalf("tunnel/udp and hysteria on same port must conflict; exist=%v err=%v", exist, err)
+	}
+}
+
+// the rich conflict detail surfaced to the user must name the offending
+// inbound (by remark when available) and the shared L4 transport(s).
+func TestCheckPortConflict_DetailMessage(t *testing.T) {
+	setupConflictDB(t)
+	seeded := &model.Inbound{
+		Tag:            "vless-443",
+		Remark:         "my-vless",
+		Enable:         true,
+		Listen:         "0.0.0.0",
+		Port:           443,
+		Protocol:       model.VLESS,
+		StreamSettings: `{"network":"tcp"}`,
+		Settings:       `{}`,
+	}
+	if err := database.GetDB().Create(seeded).Error; err != nil {
+		t.Fatalf("seed inbound: %v", err)
+	}
+
+	svc := &InboundService{}
+	candidate := &model.Inbound{
+		Tag:            "trojan-443",
+		Listen:         "0.0.0.0",
+		Port:           443,
+		Protocol:       model.Trojan,
+		StreamSettings: `{"network":"ws"}`,
+	}
+	got, err := svc.checkPortConflict(candidate, 0)
+	if err != nil || got == nil {
+		t.Fatalf("expected conflict, got=%v err=%v", got, err)
+	}
+	msg := got.String()
+	if !strings.Contains(msg, "my-vless") {
+		t.Fatalf("message should mention the conflicting inbound's remark; got %q", msg)
+	}
+	if !strings.Contains(msg, "tcp") {
+		t.Fatalf("message should mention the shared L4 transport; got %q", msg)
+	}
+	if !strings.Contains(msg, "443") {
+		t.Fatalf("message should mention the port; got %q", msg)
 	}
 }
