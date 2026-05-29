@@ -28,6 +28,9 @@ import {
   BlockOutlined,
   DeleteOutlined,
   InfoCircleOutlined,
+  TagsOutlined,
+  UsergroupAddOutlined,
+  UsergroupDeleteOutlined,
 } from '@ant-design/icons';
 
 import { HttpUtil, SizeFormatter, IntlUtil, ColorUtils } from '@/utils';
@@ -107,7 +110,7 @@ function readSettings(settings: unknown): { method?: string; network?: string; a
   return coerceInboundJsonField(settings) as { method?: string; network?: string; allowedNetwork?: string };
 }
 
-function isInboundMultiUser(record: { protocol: string; settings: unknown }): boolean {
+export function isInboundMultiUser(record: { protocol: string; settings: unknown }): boolean {
   switch (record.protocol) {
     case 'vmess':
     case 'vless':
@@ -167,6 +170,7 @@ export type RowAction =
   | 'clipboard'
   | 'delete'
   | 'resetTraffic'
+  | 'delAllClients'
   | 'clone';
 
 export type GeneralAction = 'import' | 'export' | 'subs' | 'resetInbounds';
@@ -228,11 +232,12 @@ function showQrCodeMenu(dbInbound: DBInboundRecord): boolean {
 interface RowActionsMenuProps {
   record: DBInboundRecord;
   subEnable: boolean;
+  hasClients: boolean;
   onClick: (key: RowAction) => void;
   isMobile?: boolean;
 }
 
-function buildRowActionsMenu({ record, subEnable, t, isMobile }: { record: DBInboundRecord; subEnable: boolean; t: (k: string) => string; isMobile?: boolean }): MenuProps['items'] {
+function buildRowActionsMenu({ record, subEnable, t, isMobile, hasClients }: { record: DBInboundRecord; subEnable: boolean; t: (k: string) => string; isMobile?: boolean; hasClients?: boolean }): MenuProps['items'] {
   const items: MenuProps['items'] = [];
   if (isMobile) {
     items.push({ key: 'edit', icon: <EditOutlined />, label: t('edit') });
@@ -250,16 +255,25 @@ function buildRowActionsMenu({ record, subEnable, t, isMobile }: { record: DBInb
       });
     }
   } else {
-    items.push({ key: 'showInfo', icon: <InfoCircleOutlined />, label: t('info') });
+    items.push({ key: 'showInfo', icon: <InfoCircleOutlined />, label: t('pages.inbounds.inboundInfo') });
   }
   items.push({ key: 'clipboard', icon: <CopyOutlined />, label: t('pages.inbounds.exportInbound') });
   items.push({ key: 'resetTraffic', icon: <RetweetOutlined />, label: t('pages.inbounds.resetTraffic') });
   items.push({ key: 'clone', icon: <BlockOutlined />, label: t('pages.inbounds.clone') });
+  if (isInboundMultiUser(record) && hasClients) {
+    items.push({ key: 'attachClients', icon: <UsergroupAddOutlined />, label: t('pages.inbounds.attachClients') });
+    items.push({ key: 'detachClients', icon: <UsergroupDeleteOutlined />, label: t('pages.inbounds.detachClients') });
+    items.push({ key: 'addToGroup', icon: <TagsOutlined />, label: t('pages.inbounds.addClientsToGroup') });
+    items.push({ type: 'divider' });
+    items.push({ key: 'delAllClients', icon: <UsergroupDeleteOutlined />, danger: true, label: t('pages.inbounds.delAllClients') });
+  } else {
+    items.push({ type: 'divider' });
+  }
   items.push({ key: 'delete', icon: <DeleteOutlined />, danger: true, label: t('delete') });
   return items;
 }
 
-function RowActionsCell({ record, subEnable, onClick }: RowActionsMenuProps) {
+function RowActionsCell({ record, subEnable, hasClients, onClick }: RowActionsMenuProps) {
   const { t } = useTranslation();
   return (
     <div className="action-buttons">
@@ -267,7 +281,7 @@ function RowActionsCell({ record, subEnable, onClick }: RowActionsMenuProps) {
       <Dropdown
         trigger={['click']}
         menu={{
-          items: buildRowActionsMenu({ record, subEnable, t }),
+          items: buildRowActionsMenu({ record, subEnable, t, hasClients }),
           onClick: ({ key }) => onClick(key as RowAction),
         }}
       >
@@ -350,6 +364,7 @@ export default function InboundList({
           <RowActionsCell
             record={record}
             subEnable={subEnable}
+            hasClients={(clientCount[record.id]?.clients || 0) > 0}
             onClick={(key) => onRowAction({ key, dbInbound: record })}
           />
         ),
@@ -600,7 +615,10 @@ export default function InboundList({
         {isMobile ? (
           <div className="inbound-cards">
             {sortedInbounds.length === 0 ? (
-              <div className="card-empty">—</div>
+              <div className="card-empty">
+                <ImportOutlined style={{ fontSize: 28, opacity: 0.5 }} />
+                <div>{t('noData')}</div>
+              </div>
             ) : (
               sortedInbounds.map((record) => (
                 <div key={record.id} className="inbound-card">
@@ -608,7 +626,7 @@ export default function InboundList({
                     <span className="card-id">#{record.id}</span>
                     <span className="tag-name">{record.remark}</span>
                     <div className="card-actions" onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title={t('info')}>
+                      <Tooltip title={t('pages.inbounds.inboundInfo')}>
                         <InfoCircleOutlined className="row-action-trigger" onClick={() => setStatsRecord(record)} />
                       </Tooltip>
                       <Switch
@@ -620,7 +638,7 @@ export default function InboundList({
                         trigger={['click']}
                         placement="bottomRight"
                         menu={{
-                          items: buildRowActionsMenu({ record, subEnable, t, isMobile: true }),
+                          items: buildRowActionsMenu({ record, subEnable, t, isMobile: true, hasClients: (clientCount[record.id]?.clients || 0) > 0 }),
                           onClick: ({ key }) => onRowAction({ key: key as RowAction, dbInbound: record }),
                         }}
                       >
@@ -641,6 +659,14 @@ export default function InboundList({
             scroll={{ x: 1000 }}
             style={{ marginTop: 10 }}
             size="small"
+            locale={{
+              emptyText: (
+                <div className="card-empty">
+                  <ImportOutlined style={{ fontSize: 32, marginBottom: 8 }} />
+                  <div>{t('noData')}</div>
+                </div>
+              ),
+            }}
             onChange={(_p, _f, sorter) => {
               const single = Array.isArray(sorter) ? sorter[0] : sorter;
               const colKey = (single?.columnKey || single?.field) as SortKey | undefined;

@@ -41,17 +41,17 @@ type User struct {
 
 // Inbound represents an Xray inbound configuration with traffic statistics and settings.
 type Inbound struct {
-	Id                   int                  `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`                                                    // Unique identifier
-	UserId               int                  `json:"-"`                                                                                               // Associated user ID
-	Up                   int64                `json:"up" form:"up"`                                                                                    // Upload traffic in bytes
-	Down                 int64                `json:"down" form:"down"`                                                                                // Download traffic in bytes
-	Total                int64                `json:"total" form:"total"`                                                                              // Total traffic limit in bytes
-	Remark               string               `json:"remark" form:"remark"`                                                                            // Human-readable remark
-	Enable               bool                 `json:"enable" form:"enable" gorm:"index:idx_enable_traffic_reset,priority:1"`                           // Whether the inbound is enabled
-	ExpiryTime           int64                `json:"expiryTime" form:"expiryTime"`                                                                    // Expiration timestamp
+	Id                   int                  `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`                                                                                                                 // Unique identifier
+	UserId               int                  `json:"-"`                                                                                                                                                            // Associated user ID
+	Up                   int64                `json:"up" form:"up"`                                                                                                                                                 // Upload traffic in bytes
+	Down                 int64                `json:"down" form:"down"`                                                                                                                                             // Download traffic in bytes
+	Total                int64                `json:"total" form:"total"`                                                                                                                                           // Total traffic limit in bytes
+	Remark               string               `json:"remark" form:"remark"`                                                                                                                                         // Human-readable remark
+	Enable               bool                 `json:"enable" form:"enable" gorm:"index:idx_enable_traffic_reset,priority:1"`                                                                                        // Whether the inbound is enabled
+	ExpiryTime           int64                `json:"expiryTime" form:"expiryTime"`                                                                                                                                 // Expiration timestamp
 	TrafficReset         string               `json:"trafficReset" form:"trafficReset" gorm:"default:never;index:idx_enable_traffic_reset,priority:2" validate:"omitempty,oneof=never hourly daily weekly monthly"` // Traffic reset schedule
-	LastTrafficResetTime int64                `json:"lastTrafficResetTime" form:"lastTrafficResetTime" gorm:"default:0"`                               // Last traffic reset timestamp
-	ClientStats          []xray.ClientTraffic `gorm:"foreignKey:InboundId;references:Id" json:"clientStats" form:"clientStats"`                        // Client traffic statistics
+	LastTrafficResetTime int64                `json:"lastTrafficResetTime" form:"lastTrafficResetTime" gorm:"default:0"`                                                                                            // Last traffic reset timestamp
+	ClientStats          []xray.ClientTraffic `gorm:"foreignKey:InboundId;references:Id" json:"clientStats" form:"clientStats"`                                                                                     // Client traffic statistics
 
 	// Xray configuration fields
 	Listen         string   `json:"listen" form:"listen"`
@@ -220,9 +220,18 @@ func (i *Inbound) GenXrayInboundConfig() *xray.InboundConfig {
 	listen = fmt.Sprintf("\"%v\"", listen)
 	protocol := string(i.Protocol)
 	settings := i.Settings
-	if i.Protocol == Shadowsocks {
+	switch i.Protocol {
+	case Shadowsocks:
 		if healed, ok := HealShadowsocksClientMethods(settings); ok {
 			settings = healed
+		}
+	case VMESS:
+		if stripped, ok := StripVmessClientSecurity(settings); ok {
+			settings = stripped
+		}
+	case VLESS:
+		if stripped, ok := StripVlessInboundEncryption(settings); ok {
+			settings = stripped
 		}
 	}
 	return &xray.InboundConfig{
@@ -234,6 +243,59 @@ func (i *Inbound) GenXrayInboundConfig() *xray.InboundConfig {
 		Tag:            i.Tag,
 		Sniffing:       json_util.RawMessage(i.Sniffing),
 	}
+}
+
+func StripVmessClientSecurity(settings string) (string, bool) {
+	if settings == "" {
+		return settings, false
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		return settings, false
+	}
+	clients, ok := parsed["clients"].([]any)
+	if !ok {
+		return settings, false
+	}
+	changed := false
+	for i := range clients {
+		cm, ok := clients[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, has := cm["security"]; has {
+			delete(cm, "security")
+			clients[i] = cm
+			changed = true
+		}
+	}
+	if !changed {
+		return settings, false
+	}
+	out, err := json.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		return settings, false
+	}
+	return string(out), true
+}
+
+func StripVlessInboundEncryption(settings string) (string, bool) {
+	if settings == "" {
+		return settings, false
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		return settings, false
+	}
+	if _, has := parsed["encryption"]; !has {
+		return settings, false
+	}
+	delete(parsed, "encryption")
+	out, err := json.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		return settings, false
+	}
+	return string(out), true
 }
 
 // HealShadowsocksClientMethods normalises the per-client `method` field
@@ -371,6 +433,7 @@ type Client struct {
 	Enable     bool           `json:"enable" form:"enable"`         // Whether the client is enabled
 	TgID       int64          `json:"tgId" form:"tgId"`             // Telegram user ID for notifications
 	SubID      string         `json:"subId" form:"subId"`           // Subscription identifier
+	Group      string         `json:"group,omitempty" form:"group"` // Logical grouping label
 	Comment    string         `json:"comment" form:"comment"`       // Client comment
 	Reset      int            `json:"reset" form:"reset"`           // Reset period in days
 	CreatedAt  int64          `json:"created_at,omitempty"`         // Creation timestamp
@@ -392,6 +455,7 @@ type ClientRecord struct {
 	ExpiryTime int64  `json:"expiryTime" gorm:"column:expiry_time"`
 	Enable     bool   `json:"enable" gorm:"default:true"`
 	TgID       int64  `json:"tgId" gorm:"column:tg_id"`
+	Group      string `json:"group" gorm:"column:group_name;default:''"`
 	Comment    string `json:"comment"`
 	Reset      int    `json:"reset" gorm:"default:0"`
 	CreatedAt  int64  `json:"createdAt" gorm:"autoCreateTime:milli"`
@@ -399,6 +463,15 @@ type ClientRecord struct {
 }
 
 func (ClientRecord) TableName() string { return "clients" }
+
+type ClientGroup struct {
+	Id        int    `json:"id" gorm:"primaryKey;autoIncrement"`
+	Name      string `json:"name" gorm:"uniqueIndex;not null"`
+	CreatedAt int64  `json:"createdAt" gorm:"autoCreateTime:milli"`
+	UpdatedAt int64  `json:"updatedAt" gorm:"autoUpdateTime:milli"`
+}
+
+func (ClientGroup) TableName() string { return "client_groups" }
 
 // MarshalJSON emits the reverse column as a nested JSON object rather than an
 // escaped JSON-text string, matching the same convention Inbound uses for its
@@ -440,11 +513,6 @@ type ClientInbound struct {
 
 func (ClientInbound) TableName() string { return "client_inbounds" }
 
-// InboundFallback is one routing rule on a master inbound's
-// settings.fallbacks array. The master is always a VLESS or Trojan
-// inbound on TCP transport with TLS or Reality. The child is any other
-// inbound — its listen+port becomes the fallback dest, with optional
-// SNI/ALPN/path match criteria pulled from the same row.
 type InboundFallback struct {
 	Id        int    `json:"id" gorm:"primaryKey;autoIncrement"`
 	MasterId  int    `json:"masterId" gorm:"index;not null;column:master_id"`
@@ -452,6 +520,7 @@ type InboundFallback struct {
 	Name      string `json:"name"`
 	Alpn      string `json:"alpn"`
 	Path      string `json:"path"`
+	Dest      string `json:"dest"`
 	Xver      int    `json:"xver"`
 	SortOrder int    `json:"sortOrder" gorm:"default:0;column:sort_order"`
 }
@@ -472,6 +541,7 @@ func (c *Client) ToRecord() *ClientRecord {
 		ExpiryTime: c.ExpiryTime,
 		Enable:     c.Enable,
 		TgID:       c.TgID,
+		Group:      c.Group,
 		Comment:    c.Comment,
 		Reset:      c.Reset,
 		CreatedAt:  c.CreatedAt,
@@ -499,6 +569,7 @@ func (r *ClientRecord) ToClient() *Client {
 		ExpiryTime: r.ExpiryTime,
 		Enable:     r.Enable,
 		TgID:       r.TgID,
+		Group:      r.Group,
 		Comment:    r.Comment,
 		Reset:      r.Reset,
 		CreatedAt:  r.CreatedAt,
@@ -621,6 +692,12 @@ func MergeClientRecord(existing *ClientRecord, incoming *ClientRecord) []ClientM
 		if incomingNewer || existing.Comment == "" {
 			keep("comment", existing.Comment, incoming.Comment, incoming.Comment)
 			existing.Comment = incoming.Comment
+		}
+	}
+	if existing.Group != incoming.Group && incoming.Group != "" {
+		if incomingNewer || existing.Group == "" {
+			keep("group", existing.Group, incoming.Group, incoming.Group)
+			existing.Group = incoming.Group
 		}
 	}
 	if existing.Enable != incoming.Enable {

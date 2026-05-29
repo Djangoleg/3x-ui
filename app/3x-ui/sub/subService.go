@@ -696,8 +696,17 @@ func applyShareNetworkParams(stream map[string]any, streamNetwork string, params
 			request := header["request"].(map[string]any)
 			requestPath, _ := request["path"].([]any)
 			params["path"] = requestPath[0].(string)
-			headers, _ := request["headers"].(map[string]any)
-			params["host"] = searchHost(headers)
+			host := ""
+			if response, ok := header["response"].(map[string]any); ok {
+				if respHeaders, ok := response["headers"].(map[string]any); ok {
+					host = searchHost(respHeaders)
+				}
+			}
+			if host == "" {
+				headers, _ := request["headers"].(map[string]any)
+				host = searchHost(headers)
+			}
+			params["host"] = host
 			params["headerType"] = "http"
 		}
 	case "kcp":
@@ -743,8 +752,17 @@ func applyVmessNetworkParams(stream map[string]any, network string, obj map[stri
 			request := header["request"].(map[string]any)
 			requestPath, _ := request["path"].([]any)
 			obj["path"] = requestPath[0].(string)
-			headers, _ := request["headers"].(map[string]any)
-			obj["host"] = searchHost(headers)
+			host := ""
+			if response, ok := header["response"].(map[string]any); ok {
+				if respHeaders, ok := response["headers"].(map[string]any); ok {
+					host = searchHost(respHeaders)
+				}
+			}
+			if host == "" {
+				headers, _ := request["headers"].(map[string]any)
+				host = searchHost(headers)
+			}
+			obj["host"] = host
 		}
 	case "kcp":
 		applyKcpShareObj(stream, obj)
@@ -791,6 +809,9 @@ func applyShareTLSParams(stream map[string]any, params map[string]string) {
 		if fpValue, ok := searchKey(tlsSettings, "fingerprint"); ok {
 			params["fp"], _ = fpValue.(string)
 		}
+		if pins, ok := pinnedSha256List(tlsSettings); ok {
+			params["pcs"] = strings.Join(pins, ",")
+		}
 	}
 }
 
@@ -813,7 +834,37 @@ func applyVmessTLSParams(stream map[string]any, obj map[string]any) {
 		if fpValue, ok := searchKey(tlsSettings, "fingerprint"); ok {
 			obj["fp"], _ = fpValue.(string)
 		}
+		if pins, ok := pinnedSha256List(tlsSettings); ok {
+			obj["pcs"] = strings.Join(pins, ",")
+		}
 	}
+}
+
+// pinnedSha256List extracts tlsSettings.settings.pinnedPeerCertSha256 as a
+// []string. The field is panel-only (stripped before the run-config reaches
+// xray-core via web/service/xray.go) but flows into share links so clients
+// can pin the server's certificate hash.
+func pinnedSha256List(tlsClientSettings any) ([]string, bool) {
+	raw, ok := searchKey(tlsClientSettings, "pinnedPeerCertSha256")
+	if !ok {
+		return nil, false
+	}
+	arr, ok := raw.([]any)
+	if !ok || len(arr) == 0 {
+		return nil, false
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok || s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 func applyShareRealityParams(stream map[string]any, params map[string]string) {
@@ -938,9 +989,6 @@ func applyExternalProxyTLSToStream(ep map[string]any, stream map[string]any, sec
 func externalProxySNI(ep map[string]any) (string, bool) {
 	if sni, ok := ep["sni"].(string); ok && sni != "" {
 		return sni, true
-	}
-	if dest, ok := ep["dest"].(string); ok && dest != "" {
-		return dest, true
 	}
 	return "", false
 }

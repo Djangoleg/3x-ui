@@ -112,10 +112,26 @@ function healStreamNetworkKey(stream: Record<string, unknown>): void {
   }
 }
 
-// Map a raw DB row (settings/streamSettings/sniffing as string OR object)
-// into the typed InboundFormValues. Does NOT validate against the schema —
-// callers that want a hard guarantee should follow up with
-// InboundFormSchema.safeParse(...).
+function tlsCerts(stream: Record<string, unknown>): Record<string, unknown>[] {
+  const tls = stream.tlsSettings as { certificates?: unknown } | undefined;
+  return Array.isArray(tls?.certificates) ? tls.certificates as Record<string, unknown>[] : [];
+}
+
+function synthesizeTlsCertUseFile(stream: Record<string, unknown>): void {
+  for (const c of tlsCerts(stream)) {
+    if (typeof c.useFile === 'boolean') continue;
+    const hasFile = !!c.certificateFile || !!c.keyFile;
+    const hasInline =
+      (Array.isArray(c.certificate) && c.certificate.length > 0) ||
+      (Array.isArray(c.key) && c.key.length > 0);
+    c.useFile = hasFile || !hasInline;
+  }
+}
+
+function stripTlsCertUseFile(stream: Record<string, unknown>): void {
+  for (const c of tlsCerts(stream)) delete c.useFile;
+}
+
 export function rawInboundToFormValues(row: RawInboundRow): InboundFormValues {
   const protocol = (row.protocol || 'vless') as InboundSettings['protocol'];
   const settings = coerceJsonObject(row.settings) as InboundSettings['settings'];
@@ -125,6 +141,7 @@ export function rawInboundToFormValues(row: RawInboundRow): InboundFormValues {
     : undefined;
   if (streamSettings) {
     healStreamNetworkKey(streamSettings as unknown as Record<string, unknown>);
+    synthesizeTlsCertUseFile(streamSettings as unknown as Record<string, unknown>);
   }
   const sniffing = coerceJsonObject(row.sniffing) as unknown as Sniffing;
 
@@ -181,12 +198,12 @@ export function pruneEmpty(value: unknown): unknown {
 // gives us the canonical projection.
 function clientSchemaForProtocol(protocol: string): z.ZodType | null {
   switch (protocol) {
-    case 'vless':       return VlessClientSchema;
-    case 'vmess':       return VmessClientSchema;
-    case 'trojan':      return TrojanClientSchema;
+    case 'vless': return VlessClientSchema;
+    case 'vmess': return VmessClientSchema;
+    case 'trojan': return TrojanClientSchema;
     case 'shadowsocks': return ShadowsocksClientSchema;
-    case 'hysteria':    return HysteriaClientSchema;
-    default:            return null;
+    case 'hysteria': return HysteriaClientSchema;
+    default: return null;
   }
 }
 
@@ -227,15 +244,32 @@ export function dropLegacyOptionalEmpties(
   const fb = settings.fallbacks;
   if (Array.isArray(fb) && fb.length === 0) delete settings.fallbacks;
 
-  // StreamSettings emits `finalmask` only when at least one transport
-  // mask exists (legacy `hasFinalMask`). Otherwise drop the whole block.
   if (stream) {
+    // StreamSettings emits `finalmask` only when at least one transport
+    // mask exists (legacy `hasFinalMask`). Drop the whole block when all
+    // sub-fields are empty; otherwise drop only the empty sub-arrays so
+    // the wire payload doesn't carry a stray `"tcp": []` next to a
+    // populated UDP mask list (and vice versa).
     const fm = stream.finalmask as { tcp?: unknown[]; udp?: unknown[]; quicParams?: unknown } | undefined;
     if (fm && typeof fm === 'object') {
       const hasTcp = Array.isArray(fm.tcp) && fm.tcp.length > 0;
       const hasUdp = Array.isArray(fm.udp) && fm.udp.length > 0;
       const hasQuic = fm.quicParams != null;
-      if (!hasTcp && !hasUdp && !hasQuic) delete stream.finalmask;
+      if (!hasTcp && !hasUdp && !hasQuic) {
+        delete stream.finalmask;
+      } else {
+        if (!hasTcp) delete fm.tcp;
+        if (!hasUdp) delete fm.udp;
+      }
+    }
+
+    // Hysteria's per-client auth lives in settings.clients[*].auth; the
+    // streamSettings.hysteriaSettings.auth slot is a holdover from older
+    // hysteria builds and serves no purpose on the inbound side, so an
+    // empty value shouldn't ride along in the JSON payload.
+    const hs = stream.hysteriaSettings as { auth?: string } | undefined;
+    if (hs && typeof hs === 'object' && (hs.auth === '' || hs.auth == null)) {
+      delete hs.auth;
     }
   }
 }
@@ -248,6 +282,7 @@ export function formValuesToWirePayload(values: InboundFormValues): WireInboundP
   const streamPruned = values.streamSettings
     ? ((pruneEmpty(values.streamSettings) ?? {}) as Record<string, unknown>)
     : undefined;
+  if (streamPruned) stripTlsCertUseFile(streamPruned);
   dropLegacyOptionalEmpties(settingsPruned, streamPruned);
   const payload: WireInboundPayload = {
     up: values.up,

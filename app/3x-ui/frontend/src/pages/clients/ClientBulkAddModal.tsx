@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Form, Input, InputNumber, Modal, Select, Switch, message } from 'antd';
-import { SyncOutlined } from '@ant-design/icons';
+import { AutoComplete, Button, Form, Input, InputNumber, Modal, Select, Space, Switch, message } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 
@@ -21,6 +21,7 @@ interface ClientBulkAddModalProps {
   open: boolean;
   inbounds: InboundOption[];
   ipLimitEnable?: boolean;
+  groups?: string[];
   onOpenChange: (open: boolean) => void;
   onSaved?: () => void;
 }
@@ -36,11 +37,13 @@ function emptyForm(): FormState {
     emailPostfix: '',
     quantity: 1,
     subId: '',
+    group: '',
     comment: '',
     flow: '',
     limitIp: 0,
     totalGB: 0,
     expiryTime: 0,
+    reset: 0,
     inboundIds: [],
   };
 }
@@ -49,6 +52,7 @@ export default function ClientBulkAddModal({
   open,
   inbounds,
   ipLimitEnable = false,
+  groups = [],
   onOpenChange,
   onSaved,
 }: ClientBulkAddModalProps) {
@@ -96,7 +100,7 @@ export default function ClientBulkAddModal({
     () => (inbounds || [])
       .filter((ib) => MULTI_CLIENT_PROTOCOLS.has(ib.protocol || ''))
       .map((ib) => ({
-        label: `${ib.remark || `#${ib.id}`} · ${ib.protocol}:${ib.port}`,
+        label: ib.tag ?? '',
         value: ib.id,
       })),
     [inbounds],
@@ -126,7 +130,7 @@ export default function ClientBulkAddModal({
     const postfix = method > 2 && form.emailPostfix.length > 0 ? form.emailPostfix : '';
     for (let i = start; i < end; i++) {
       let email = '';
-      if (method !== 4) email = RandomUtil.randomLowerAndNum(6);
+      if (method !== 4) email = RandomUtil.randomLowerAndNum(10);
       email += useNum ? prefix + String(i) + postfix : prefix + postfix;
       out.push(email);
     }
@@ -154,7 +158,9 @@ export default function ClientBulkAddModal({
           flow: showFlow ? (form.flow || '') : '',
           totalGB: Math.round((form.totalGB || 0) * SizeFormatter.ONE_GB),
           expiryTime: form.expiryTime,
+          reset: Number(form.reset) || 0,
           limitIp: Number(form.limitIp) || 0,
+          group: form.group,
           comment: form.comment,
           enable: true,
         },
@@ -247,16 +253,32 @@ export default function ClientBulkAddModal({
             </Form.Item>
           )}
 
-          <Form.Item label={
-            <>
-              {t('subscription.title')}
-              <SyncOutlined
-                className="random-icon"
+          <Form.Item label={t('pages.clients.subId')}>
+            <Space.Compact style={{ display: 'flex' }}>
+              <Input
+                value={form.subId}
+                onChange={(e) => update('subId', e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <Button
+                icon={<ReloadOutlined />}
                 onClick={() => update('subId', RandomUtil.randomLowerAndNum(16))}
               />
-            </>
-          }>
-            <Input value={form.subId} onChange={(e) => update('subId', e.target.value)} />
+            </Space.Compact>
+          </Form.Item>
+
+          <Form.Item label={t('pages.clients.group')} tooltip={t('pages.clients.groupDesc')}>
+            <AutoComplete
+              value={form.group}
+              placeholder={t('pages.clients.groupPlaceholder')}
+              options={groups.map((g) => ({ value: g }))}
+              onChange={(v) => update('group', v ?? '')}
+              filterOption={(input, option) =>
+                String(option?.value ?? '').toLowerCase().includes((input || '').toLowerCase())
+              }
+              allowClear
+              style={{ width: '100%' }}
+            />
           </Form.Item>
 
           <Form.Item label={t('comment')}>
@@ -310,6 +332,17 @@ export default function ClientBulkAddModal({
               />
             </Form.Item>
           )}
+
+          <Form.Item
+            label={t('pages.clients.renew')}
+            tooltip={t('pages.clients.renewDesc')}
+          >
+            <InputNumber
+              value={form.reset}
+              min={0}
+              onChange={(v) => update('reset', Number(v) || 0)}
+            />
+          </Form.Item>
         </Form>
       </Modal>
     </>

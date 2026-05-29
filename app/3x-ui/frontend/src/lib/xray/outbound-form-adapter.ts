@@ -1,3 +1,4 @@
+import { XHttpXmuxSchema } from '@/schemas/protocols/stream/xhttp';
 import { Wireguard } from '@/utils';
 
 import type {
@@ -116,7 +117,7 @@ function vlessFromWire(raw: Raw): VlessOutboundFormSettings {
   const testseed = savedSeed.length === 4
     && savedSeed.every((n) => Number.isInteger(n) && (n as number) > 0)
     ? (savedSeed as number[])
-    : [];
+    : [900, 500, 900, 256];
   return {
     address,
     port,
@@ -265,6 +266,10 @@ function freedomFromWire(raw: Raw): FreedomOutboundFormSettings {
       return (allowed.includes(s) ? s : '') as FreedomOutboundFormSettings['domainStrategy'];
     })(),
     redirect: asString(raw.redirect),
+    proxyProtocol: ((): FreedomOutboundFormSettings['proxyProtocol'] => {
+      const n = asNumber(raw.proxyProtocol, 0);
+      return (n === 1 || n === 2) ? n : 0;
+    })(),
     fragment: wireHasFragment
       ? {
           packets: asString(fragment.packets, '1-3'),
@@ -341,6 +346,23 @@ export interface RawOutboundRow {
   mux?: unknown;
 }
 
+export const XMUX_DEFAULTS = XHttpXmuxSchema.parse({});
+
+function hydrateStreamForm(stream: Raw): OutboundStreamFormValues {
+  const next = { ...stream };
+  const xh = next.xhttpSettings;
+  if (xh && typeof xh === 'object' && !Array.isArray(xh)) {
+    const xhttp = { ...(xh as Raw) };
+    const xmux = xhttp.xmux;
+    if (xmux && typeof xmux === 'object' && !Array.isArray(xmux)) {
+      xhttp.enableXmux = true;
+      xhttp.xmux = { ...XMUX_DEFAULTS, ...(xmux as Raw) };
+    }
+    next.xhttpSettings = xhttp;
+  }
+  return next as unknown as OutboundStreamFormValues;
+}
+
 export function rawOutboundToFormValues(raw: RawOutboundRow): OutboundFormValues {
   const protocol = asString(raw.protocol, 'vless');
   const settings = asObject(raw.settings);
@@ -351,7 +373,7 @@ export function rawOutboundToFormValues(raw: RawOutboundRow): OutboundFormValues
     && typeof raw.streamSettings === 'object'
     && Object.keys(raw.streamSettings as Raw).length > 0;
   const streamSettings = hasStream
-    ? (raw.streamSettings as unknown as OutboundStreamFormValues)
+    ? hydrateStreamForm(raw.streamSettings as Raw)
     : undefined;
 
   let typed: OutboundFormSettings;
@@ -489,6 +511,7 @@ function freedomToWire(s: FreedomOutboundFormSettings) {
   return {
     domainStrategy: s.domainStrategy || undefined,
     redirect: s.redirect || undefined,
+    proxyProtocol: s.proxyProtocol || undefined,
     fragment: fragmentEnabled ? Object.fromEntries(fragmentEntries) : undefined,
     noises: s.noises.length > 0 ? s.noises : undefined,
     finalRules: s.finalRules.length > 0
@@ -553,7 +576,9 @@ function stripUiOnlyStreamFields(stream: unknown): Raw {
   const xh = next.xhttpSettings;
   if (xh && typeof xh === 'object') {
     const cleaned = { ...(xh as Raw) };
+    const xmuxEnabled = cleaned.enableXmux === true;
     delete cleaned.enableXmux;
+    if (!xmuxEnabled) delete cleaned.xmux;
     next.xhttpSettings = dropEmptyStrings(cleaned);
   }
   return next;

@@ -88,6 +88,8 @@ export default function RoutingTab({
     () => (templateSettings?.routing?.rules || []) as RoutingRule[],
     [templateSettings?.routing?.rules],
   );
+  const rulesRef = useRef(rules);
+  rulesRef.current = rules;
 
   const rows: RuleRow[] = useMemo(
     () =>
@@ -171,7 +173,7 @@ export default function RoutingTab({
     setRuleModalOpen(true);
   }
   function openEdit(idx: number) {
-    setEditingRule(rules[idx]);
+    setEditingRule(rulesRef.current[idx]);
     setEditingIndex(idx);
     setRuleModalOpen(true);
   }
@@ -291,7 +293,7 @@ export default function RoutingTab({
           <div className="action-cell">
             <HolderOutlined
               className="drag-handle"
-              title="Drag to reorder"
+              title={t('pages.xray.routing.dragToReorder')}
               onPointerDown={(ev: React.PointerEvent) => onHandlePointerDown(index, ev)}
             />
             <span className="row-index">{index + 1}</span>
@@ -324,7 +326,7 @@ export default function RoutingTab({
         ),
       },
       {
-        title: 'Source',
+        title: t('pages.xray.rules.source'),
         align: 'left',
         width: 180,
         key: 'source',
@@ -352,7 +354,7 @@ export default function RoutingTab({
         ),
       },
       {
-        title: 'Destination',
+        title: t('pages.xray.rules.dest'),
         align: 'left',
         key: 'destination',
         render: (_v, record) => (

@@ -26,7 +26,7 @@ import {
   DeleteOutlined,
   MinusOutlined,
   PlusOutlined,
-  SyncOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 
 import { HttpUtil, NumberFormatter, RandomUtil, SizeFormatter, Wireguard } from '@/utils';
@@ -365,13 +365,21 @@ export default function InboundFormModal({
       return;
     }
     setFallbacks(
-      (msg.obj as { childId: number; name?: string; alpn?: string; path?: string; xver?: number }[])
+      (msg.obj as {
+        childId: number;
+        name?: string;
+        alpn?: string;
+        path?: string;
+        dest?: string;
+        xver?: number;
+      }[])
         .map((r) => ({
           rowKey: `fb-${++fallbackKeyRef.current}`,
           childId: r.childId,
           name: r.name || '',
           alpn: r.alpn || '',
           path: r.path || '',
+          dest: r.dest || '',
           xver: r.xver || 0,
         })),
     );
@@ -385,6 +393,7 @@ export default function InboundFormModal({
         name: c.name,
         alpn: c.alpn,
         path: c.path,
+        dest: c.dest,
         xver: Number(c.xver) || 0,
         sortOrder: i,
       })),
@@ -437,6 +446,7 @@ export default function InboundFormModal({
       name: '',
       alpn: '',
       path: '',
+      dest: '',
       xver: 0,
     }]);
   };
@@ -445,11 +455,11 @@ export default function InboundFormModal({
     setFallbacks((prev) => prev.map((r) => {
       if (r.rowKey !== rowKey) return r;
       // When the picker selects a new child inbound and the row hasn't
-      // been hand-edited yet (sni/alpn/path all blank, xver = 0), pull
-      // the SNI/ALPN/Path defaults off that child. Operators who
+      // been hand-edited yet (sni/alpn/path/dest all blank, xver = 0),
+      // pull the SNI/ALPN/Path defaults off that child. Operators who
       // intentionally typed values keep them — we only fill the empties.
       if (typeof patch.childId === 'number' && patch.childId !== r.childId) {
-        const isPristine = !r.name && !r.alpn && !r.path && r.xver === 0;
+        const isPristine = !r.name && !r.alpn && !r.path && !r.dest && r.xver === 0;
         if (isPristine) return { ...r, ...patch, ...deriveFallbackDefaults(patch.childId) };
       }
       return { ...r, ...patch };
@@ -490,6 +500,7 @@ export default function InboundFormModal({
             name: derived.name ?? '',
             alpn: derived.alpn ?? '',
             path: derived.path ?? '',
+            dest: '',
             xver: derived.xver ?? 0,
           };
         });
@@ -570,6 +581,56 @@ export default function InboundFormModal({
   const clearEchCert = () => {
     form.setFieldValue(['streamSettings', 'tlsSettings', 'echServerKeys'], '');
     form.setFieldValue(['streamSettings', 'tlsSettings', 'settings', 'echConfigList'], '');
+  };
+
+  const generateRandomPinHash = () => {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    let binary = '';
+    for (const b of bytes) binary += String.fromCharCode(b);
+    const hash = btoa(binary);
+    const current = (form.getFieldValue(
+      ['streamSettings', 'tlsSettings', 'settings', 'pinnedPeerCertSha256'],
+    ) as string[] | undefined) ?? [];
+    form.setFieldValue(
+      ['streamSettings', 'tlsSettings', 'settings', 'pinnedPeerCertSha256'],
+      [...current, hash],
+    );
+  };
+
+  const setCertFromPanel = async (certName: number) => {
+    setSaving(true);
+    try {
+      const msg = await HttpUtil.post('/panel/setting/all', undefined, { silent: true });
+      if (msg?.success) {
+        const obj = msg.obj as { webCertFile?: string; webKeyFile?: string };
+        if (!obj.webCertFile && !obj.webKeyFile) {
+          messageApi.warning(t('pages.inbounds.setDefaultCertEmpty'));
+          return;
+        }
+        form.setFieldValue(
+          ['streamSettings', 'tlsSettings', 'certificates', certName, 'certificateFile'],
+          obj.webCertFile ?? '',
+        );
+        form.setFieldValue(
+          ['streamSettings', 'tlsSettings', 'certificates', certName, 'keyFile'],
+          obj.webKeyFile ?? '',
+        );
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearCertFiles = (certName: number) => {
+    form.setFieldValue(
+      ['streamSettings', 'tlsSettings', 'certificates', certName, 'certificateFile'],
+      '',
+    );
+    form.setFieldValue(
+      ['streamSettings', 'tlsSettings', 'certificates', certName, 'keyFile'],
+      '',
+    );
   };
 
   const onSecurityChange = async (next: string) => {
@@ -762,6 +823,18 @@ export default function InboundFormModal({
           security: 'tls',
           hysteriaSettings: HysteriaStreamSettingsSchema.parse({}),
           tlsSettings: tls,
+          // Hysteria2 needs an obfs wrapper on the FinalMask side; seed
+          // it with salamander + a random password so the listener boots
+          // with a usable default. Re-selecting Hysteria from another
+          // protocol re-runs this and refreshes the password — that's
+          // intentional, the form was already being reset.
+          finalmask: {
+            tcp: [],
+            udp: [{
+              type: 'salamander',
+              settings: { password: RandomUtil.randomLowerAndNum(16) },
+            }],
+          },
         });
       } else {
         const current = form.getFieldValue('streamSettings') as { network?: string } | undefined;
@@ -858,14 +931,11 @@ export default function InboundFormModal({
             disabled={mode === 'edit'}
             placeholder={t('pages.inbounds.localPanel')}
             allowClear
-            options={[
-              { value: null, label: t('pages.inbounds.localPanel') },
-              ...selectableNodes.map((n) => ({
-                value: n.id,
-                label: `${n.name}${n.status === 'offline' ? ' (offline)' : ''}`,
-                disabled: n.status === 'offline',
-              })),
-            ]}
+            options={selectableNodes.map((n) => ({
+              value: n.id,
+              label: `${n.name}${n.status === 'offline' ? ' (offline)' : ''}`,
+              disabled: n.status === 'offline',
+            }))}
           />
         </Form.Item>
       )}
@@ -983,14 +1053,14 @@ export default function InboundFormModal({
             <Button
               disabled={idx === 0}
               onClick={() => moveFallback(idx, -1)}
-              title="Move up"
+              title={t('pages.inbounds.form.moveUp')}
             >
               <ArrowUpOutlined />
             </Button>
             <Button
               disabled={idx === fallbacks.length - 1}
               onClick={() => moveFallback(idx, 1)}
-              title="Move down"
+              title={t('pages.inbounds.form.moveDown')}
             >
               <ArrowDownOutlined />
             </Button>
@@ -1017,6 +1087,12 @@ export default function InboundFormModal({
               value={record.path}
               onChange={(e) => updateFallback(record.rowKey, { path: e.target.value })}
             />
+            <InputAddon>Dest</InputAddon>
+            <Input
+              placeholder={t('pages.inbounds.fallbacks.destPlaceholder') || 'auto'}
+              value={record.dest}
+              onChange={(e) => updateFallback(record.rowKey, { dest: e.target.value })}
+            />
             <InputAddon>xver</InputAddon>
             <InputNumber
               min={0}
@@ -1036,9 +1112,9 @@ export default function InboundFormModal({
           onClick={addAllFallbacks}
           disabled={fallbackChildOptions.length === 0
             || fallbacks.length >= fallbackChildOptions.length}
-          title="Add a fallback row for every eligible inbound not yet wired up"
+          title={t('pages.inbounds.form.addAllFallbackTooltip')}
         >
-          Add all
+          {t('pages.inbounds.form.addAll')}
         </Button>
       </Space>
     </Card>
@@ -1048,18 +1124,15 @@ export default function InboundFormModal({
     <>
       {protocol === Protocols.WIREGUARD && (
         <>
-          <Form.Item
-            name={['settings', 'secretKey']}
-            label={
-              <>
-                Secret key{' '}
-                <SyncOutlined className="random-icon" onClick={regenInboundWg} />
-              </>
-            }
-          >
-            <Input />
+          <Form.Item label={t('pages.xray.wireguard.secretKey')}>
+            <Space.Compact block>
+              <Form.Item name={['settings', 'secretKey']} noStyle>
+                <Input style={{ width: 'calc(100% - 32px)' }} />
+              </Form.Item>
+              <Button icon={<ReloadOutlined />} onClick={regenInboundWg} />
+            </Space.Compact>
           </Form.Item>
-          <Form.Item label="Public key">
+          <Form.Item label={t('pages.xray.wireguard.publicKey')}>
             <Input value={wgPubKey} disabled />
           </Form.Item>
           <Form.Item name={['settings', 'mtu']} label="MTU">
@@ -1067,7 +1140,7 @@ export default function InboundFormModal({
           </Form.Item>
           <Form.Item
             name={['settings', 'noKernelTun']}
-            label="No-kernel TUN"
+            label={t('pages.inbounds.info.noKernelTun')}
             valuePropName="checked"
           >
             <Switch />
@@ -1075,7 +1148,7 @@ export default function InboundFormModal({
           <Form.List name={['settings', 'peers']}>
             {(fields, { add, remove }) => (
               <>
-                <Form.Item label="Peers">
+                <Form.Item label={t('pages.inbounds.form.peers')}>
                   <Button
                     size="small"
                     onClick={() => {
@@ -1088,14 +1161,14 @@ export default function InboundFormModal({
                       });
                     }}
                   >
-                    <PlusOutlined /> Add peer
+                    <PlusOutlined /> {t('pages.inbounds.form.addPeer')}
                   </Button>
                 </Form.Item>
                 {fields.map((field, idx) => (
                   <div key={field.key} className="wg-peer">
                     <Divider titlePlacement="center">
                       <Space>
-                        <span>Peer {idx + 1}</span>
+                        <span>{t('pages.inbounds.info.peerNumber', { n: idx + 1 })}</span>
                         {fields.length > 1 && (
                           <Button
                             size="small"
@@ -1106,21 +1179,18 @@ export default function InboundFormModal({
                         )}
                       </Space>
                     </Divider>
-                    <Form.Item
-                      name={[field.name, 'privateKey']}
-                      label={
-                        <>
-                          Secret key{' '}
-                          <SyncOutlined
-                            className="random-icon"
-                            onClick={() => regenWgPeerKeypair(field.name)}
-                          />
-                        </>
-                      }
-                    >
-                      <Input />
+                    <Form.Item label={t('pages.xray.wireguard.secretKey')}>
+                      <Space.Compact block>
+                        <Form.Item name={[field.name, 'privateKey']} noStyle>
+                          <Input style={{ width: 'calc(100% - 32px)' }} />
+                        </Form.Item>
+                        <Button
+                          icon={<ReloadOutlined />}
+                          onClick={() => regenWgPeerKeypair(field.name)}
+                        />
+                      </Space.Compact>
                     </Form.Item>
-                    <Form.Item name={[field.name, 'publicKey']} label="Public key">
+                    <Form.Item name={[field.name, 'publicKey']} label={t('pages.xray.wireguard.publicKey')}>
                       <Input />
                     </Form.Item>
                     <Form.Item name={[field.name, 'preSharedKey']} label="PSK">
@@ -1128,7 +1198,7 @@ export default function InboundFormModal({
                     </Form.Item>
                     <Form.List name={[field.name, 'allowedIPs']}>
                       {(ipFields, { add: addIp, remove: removeIp }) => (
-                        <Form.Item label="Allowed IPs">
+                        <Form.Item label={t('pages.xray.wireguard.allowedIPs')}>
                           <Button size="small" onClick={() => addIp('')}>
                             <PlusOutlined />
                           </Button>
@@ -1147,7 +1217,7 @@ export default function InboundFormModal({
                         </Form.Item>
                       )}
                     </Form.List>
-                    <Form.Item name={[field.name, 'keepAlive']} label="Keep-alive">
+                    <Form.Item name={[field.name, 'keepAlive']} label={t('pages.inbounds.form.keepAlive')}>
                       <InputNumber min={0} />
                     </Form.Item>
                   </div>
@@ -1160,7 +1230,7 @@ export default function InboundFormModal({
 
       {protocol === Protocols.TUN && (
         <>
-          <Form.Item name={['settings', 'name']} label="Interface name">
+          <Form.Item name={['settings', 'name']} label={t('pages.inbounds.info.interfaceName')}>
             <Input placeholder="xray0" />
           </Form.Item>
           <Form.Item name={['settings', 'mtu']} label="MTU">
@@ -1168,7 +1238,7 @@ export default function InboundFormModal({
           </Form.Item>
           <Form.List name={['settings', 'gateway']}>
             {(fields, { add, remove }) => (
-              <Form.Item label="Gateway">
+              <Form.Item label={t('pages.inbounds.info.gateway')}>
                 <Button size="small" onClick={() => add('')}>
                   <PlusOutlined />
                 </Button>
@@ -1204,15 +1274,15 @@ export default function InboundFormModal({
               </Form.Item>
             )}
           </Form.List>
-          <Form.Item name={['settings', 'userLevel']} label="User level">
+          <Form.Item name={['settings', 'userLevel']} label={t('pages.xray.tun.userLevel')}>
             <InputNumber min={0} />
           </Form.Item>
           <Form.List name={['settings', 'autoSystemRoutingTable']}>
             {(fields, { add, remove }) => (
               <Form.Item
                 label={
-                  <Tooltip title="Windows-only. CIDRs added to the system routing table automatically so matching traffic goes through TUN.">
-                    Auto system routes
+                  <Tooltip title={t('pages.inbounds.form.autoSystemRoutesTooltip')}>
+                    {t('pages.inbounds.info.autoSystemRoutes')}
                   </Tooltip>
                 }
               >
@@ -1235,8 +1305,8 @@ export default function InboundFormModal({
           <Form.Item
             name={['settings', 'autoOutboundsInterface']}
             label={
-              <Tooltip title="Physical interface for outbound traffic. Use 'auto' to detect; auto-enabled when Auto system routes is set.">
-                Auto outbounds interface
+              <Tooltip title={t('pages.inbounds.form.autoOutboundsInterfaceTooltip')}>
+                {t('pages.inbounds.form.autoOutboundsInterface')}
               </Tooltip>
             }
           >
@@ -1247,13 +1317,13 @@ export default function InboundFormModal({
 
       {protocol === Protocols.TUNNEL && (
         <>
-          <Form.Item name={['settings', 'rewriteAddress']} label="Rewrite address">
+          <Form.Item name={['settings', 'rewriteAddress']} label={t('pages.inbounds.form.rewriteAddress')}>
             <Input />
           </Form.Item>
-          <Form.Item name={['settings', 'rewritePort']} label="Rewrite port">
+          <Form.Item name={['settings', 'rewritePort']} label={t('pages.inbounds.form.rewritePort')}>
             <InputNumber min={0} max={65535} />
           </Form.Item>
-          <Form.Item name={['settings', 'allowedNetwork']} label="Allowed network">
+          <Form.Item name={['settings', 'allowedNetwork']} label={t('pages.inbounds.form.allowedNetwork')}>
             <Select
               options={[
                 { value: 'tcp,udp', label: 'TCP, UDP' },
@@ -1262,12 +1332,12 @@ export default function InboundFormModal({
               ]}
             />
           </Form.Item>
-          <Form.Item label="Port map" name={['settings', 'portMap']}>
+          <Form.Item label={t('pages.inbounds.portMap')} name={['settings', 'portMap']}>
             <HeaderMapEditor mode="v1" />
           </Form.Item>
           <Form.Item
             name={['settings', 'followRedirect']}
-            label="Follow redirect"
+            label={t('pages.inbounds.form.followRedirect')}
             valuePropName="checked"
           >
             <Switch />
@@ -1280,7 +1350,7 @@ export default function InboundFormModal({
           <Form.List name={['settings', 'accounts']}>
             {(fields, { add, remove }) => (
               <>
-                <Form.Item label="Accounts">
+                <Form.Item label={t('pages.inbounds.form.accounts')}>
                   <Button
                     size="small"
                     onClick={() => add({
@@ -1288,7 +1358,7 @@ export default function InboundFormModal({
                       pass: RandomUtil.randomLowerAndNum(12),
                     })}
                   >
-                    <PlusOutlined /> Add
+                    <PlusOutlined /> {t('add')}
                   </Button>
                 </Form.Item>
                 {fields.length > 0 && (
@@ -1297,10 +1367,10 @@ export default function InboundFormModal({
                       <Space.Compact key={field.key} className="mb-8" block>
                         <InputAddon>{String(idx + 1)}</InputAddon>
                         <Form.Item name={[field.name, 'user']} noStyle>
-                          <Input placeholder="Username" />
+                          <Input placeholder={t('username')} />
                         </Form.Item>
                         <Form.Item name={[field.name, 'pass']} noStyle>
-                          <Input placeholder="Password" />
+                          <Input placeholder={t('password')} />
                         </Form.Item>
                         <Button onClick={() => remove(field.name)}>
                           <MinusOutlined />
@@ -1315,7 +1385,7 @@ export default function InboundFormModal({
           {protocol === Protocols.HTTP && (
             <Form.Item
               name={['settings', 'allowTransparent']}
-              label="Allow transparent"
+              label={t('pages.inbounds.form.allowTransparent')}
               valuePropName="checked"
             >
               <Switch />
@@ -1323,7 +1393,7 @@ export default function InboundFormModal({
           )}
           {protocol === Protocols.MIXED && (
             <>
-              <Form.Item name={['settings', 'auth']} label="Auth">
+              <Form.Item name={['settings', 'auth']} label={t('pages.inbounds.info.auth')}>
                 <Select
                   options={[
                     { value: 'noauth', label: 'noauth' },
@@ -1350,7 +1420,7 @@ export default function InboundFormModal({
 
       {protocol === Protocols.SHADOWSOCKS && (
         <>
-          <Form.Item name={['settings', 'method']} label="Encryption method">
+          <Form.Item name={['settings', 'method']} label={t('pages.inbounds.form.encryptionMethod')}>
             <Select
               onChange={(v) => {
                 form.setFieldValue(
@@ -1362,28 +1432,25 @@ export default function InboundFormModal({
             />
           </Form.Item>
           {isSSWith2022 && (
-            <Form.Item
-              name={['settings', 'password']}
-              label={
-                <>
-                  Password{' '}
-                  <SyncOutlined
-                    className="random-icon"
-                    onClick={() => {
-                      const method = form.getFieldValue(['settings', 'method']);
-                      form.setFieldValue(
-                        ['settings', 'password'],
-                        RandomUtil.randomShadowsocksPassword(method as string),
-                      );
-                    }}
-                  />
-                </>
-              }
-            >
-              <Input />
+            <Form.Item label={t('password')}>
+              <Space.Compact block>
+                <Form.Item name={['settings', 'password']} noStyle>
+                  <Input style={{ width: 'calc(100% - 32px)' }} />
+                </Form.Item>
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={() => {
+                    const method = form.getFieldValue(['settings', 'method']);
+                    form.setFieldValue(
+                      ['settings', 'password'],
+                      RandomUtil.randomShadowsocksPassword(method as string),
+                    );
+                  }}
+                />
+              </Space.Compact>
             </Form.Item>
           )}
-          <Form.Item name={['settings', 'network']} label="Network">
+          <Form.Item name={['settings', 'network']} label={t('pages.inbounds.network')}>
             <Select
               style={{ width: 120 }}
               options={[
@@ -1425,6 +1492,20 @@ export default function InboundFormModal({
               {t('pages.inbounds.vlessAuthSelected', { auth: selectedVlessAuth })}
             </Text>
           </Form.Item>
+          {network === 'tcp' && (security === 'tls' || security === 'reality') && (
+            <Form.Item
+              label={t('pages.inbounds.form.visionTestseed')}
+              extra="Applies only to clients using the xtls-rprx-vision flow; ignored otherwise."
+            >
+              <Space.Compact block>
+                {[900, 500, 900, 256].map((def, i) => (
+                  <Form.Item key={i} name={['settings', 'testseed', i]} noStyle initialValue={def}>
+                    <InputNumber min={1} style={{ width: '25%' }} />
+                  </Form.Item>
+                ))}
+              </Space.Compact>
+            </Form.Item>
+          )}
         </>
       )}
 
@@ -1463,13 +1544,31 @@ export default function InboundFormModal({
       if (k !== `${next}Settings`) delete cleaned[k];
     }
     cleaned[`${next}Settings`] = newStreamSlice(next);
+    // mKCP wants a UDP mask wrapper on the FinalMask side; seed it with
+    // `mkcp-original` so the inbound boots with a sensible default
+    // instead of unobfuscated mKCP traffic. The user can still edit or
+    // clear the mask via the FinalMask section.
+    if (next === 'kcp') {
+      const fm = (cleaned.finalmask as Record<string, unknown> | undefined) ?? {};
+      const udp = Array.isArray(fm.udp) ? (fm.udp as unknown[]) : [];
+      const hasMkcp = udp.some((m) => {
+        const entry = m as { type?: string };
+        return entry?.type === 'mkcp-original';
+      });
+      if (!hasMkcp) {
+        cleaned.finalmask = {
+          ...fm,
+          udp: [...udp, { type: 'mkcp-original', settings: {} }],
+        };
+      }
+    }
     form.setFieldValue('streamSettings', cleaned);
   };
 
   const streamTab = (
     <>
       {protocol !== Protocols.HYSTERIA && (
-        <Form.Item label="Transmission" name={['streamSettings', 'network']}>
+        <Form.Item label={t('transmission')} name={['streamSettings', 'network']}>
           <Select
             style={{ width: '75%' }}
             onChange={onNetworkChange}
@@ -1495,19 +1594,19 @@ export default function InboundFormModal({
       {protocol === Protocols.HYSTERIA && (
         <>
           <Form.Item
-            label="Version"
+            label={t('pages.inbounds.form.version')}
             name={['streamSettings', 'hysteriaSettings', 'version']}
           >
             <InputNumber min={2} max={2} disabled />
           </Form.Item>
           <Form.Item
-            label="UDP idle timeout (s)"
+            label={t('pages.inbounds.form.udpIdleTimeout')}
             name={['streamSettings', 'hysteriaSettings', 'udpIdleTimeout']}
           >
             <InputNumber min={1} style={{ width: '100%' }} />
           </Form.Item>
 
-          <Form.Item label="Masquerade">
+          <Form.Item label={t('pages.inbounds.form.masquerade')}>
             <Form.Item shouldUpdate noStyle>
               {() => {
                 const m = form.getFieldValue([
@@ -1542,7 +1641,7 @@ export default function InboundFormModal({
               return (
                 <>
                   <Form.Item
-                    label="Type"
+                    label={t('pages.inbounds.form.type')}
                     name={['streamSettings', 'hysteriaSettings', 'masquerade', 'type']}
                   >
                     <Select
@@ -1557,20 +1656,20 @@ export default function InboundFormModal({
                   {m.type === 'proxy' && (
                     <>
                       <Form.Item
-                        label="Upstream URL"
+                        label={t('pages.inbounds.form.upstreamUrl')}
                         name={['streamSettings', 'hysteriaSettings', 'masquerade', 'url']}
                       >
                         <Input placeholder="https://www.example.com" />
                       </Form.Item>
                       <Form.Item
-                        label="Rewrite Host"
+                        label={t('pages.inbounds.form.rewriteHost')}
                         name={['streamSettings', 'hysteriaSettings', 'masquerade', 'rewriteHost']}
                         valuePropName="checked"
                       >
                         <Switch />
                       </Form.Item>
                       <Form.Item
-                        label="Skip TLS verify"
+                        label={t('pages.inbounds.form.skipTlsVerify')}
                         name={['streamSettings', 'hysteriaSettings', 'masquerade', 'insecure']}
                         valuePropName="checked"
                       >
@@ -1580,7 +1679,7 @@ export default function InboundFormModal({
                   )}
                   {m.type === 'file' && (
                     <Form.Item
-                      label="Directory"
+                      label={t('pages.inbounds.form.directory')}
                       name={['streamSettings', 'hysteriaSettings', 'masquerade', 'dir']}
                     >
                       <Input placeholder="/var/www/html" />
@@ -1589,19 +1688,19 @@ export default function InboundFormModal({
                   {m.type === 'string' && (
                     <>
                       <Form.Item
-                        label="Status code"
+                        label={t('pages.inbounds.form.statusCode')}
                         name={['streamSettings', 'hysteriaSettings', 'masquerade', 'statusCode']}
                       >
                         <InputNumber min={0} max={599} style={{ width: '100%' }} />
                       </Form.Item>
                       <Form.Item
-                        label="Body"
+                        label={t('pages.inbounds.form.body')}
                         name={['streamSettings', 'hysteriaSettings', 'masquerade', 'content']}
                       >
                         <Input.TextArea autoSize={{ minRows: 3 }} />
                       </Form.Item>
                       <Form.Item
-                        label="Headers"
+                        label={t('pages.inbounds.form.headers')}
                         name={['streamSettings', 'hysteriaSettings', 'masquerade', 'headers']}
                       >
                         <HeaderMapEditor mode="v1" />
@@ -1619,7 +1718,7 @@ export default function InboundFormModal({
         <>
           <Form.Item
             name={['streamSettings', 'tcpSettings', 'acceptProxyProtocol']}
-            label="Proxy Protocol"
+            label={t('pages.inbounds.form.proxyProtocol')}
             valuePropName="checked"
           >
             <Switch />
@@ -1688,7 +1787,49 @@ export default function InboundFormModal({
               return (
                 <>
                   <Form.Item
-                    label="Response version"
+                    label={t('pages.inbounds.form.requestVersion')}
+                    name={[
+                      'streamSettings', 'tcpSettings', 'header',
+                      'request', 'version',
+                    ]}
+                  >
+                    <Input placeholder="1.1" />
+                  </Form.Item>
+                  <Form.Item
+                    label={t('pages.inbounds.form.requestMethod')}
+                    name={[
+                      'streamSettings', 'tcpSettings', 'header',
+                      'request', 'method',
+                    ]}
+                  >
+                    <Input placeholder="GET" />
+                  </Form.Item>
+                  <Form.Item
+                    label={t('pages.inbounds.form.requestPath')}
+                    name={[
+                      'streamSettings', 'tcpSettings', 'header',
+                      'request', 'path',
+                    ]}
+                    getValueProps={(v) => ({ value: Array.isArray(v) ? v.join(',') : v })}
+                    getValueFromEvent={(e) => {
+                      const raw = (e?.target?.value ?? '') as string;
+                      const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+                      return parts.length > 0 ? parts : ['/'];
+                    }}
+                  >
+                    <Input placeholder="/" />
+                  </Form.Item>
+                  <Form.Item
+                    label={t('pages.inbounds.form.requestHeaders')}
+                    name={[
+                      'streamSettings', 'tcpSettings', 'header',
+                      'request', 'headers',
+                    ]}
+                  >
+                    <HeaderMapEditor mode="v2" />
+                  </Form.Item>
+                  <Form.Item
+                    label={t('pages.inbounds.form.responseVersion')}
                     name={[
                       'streamSettings', 'tcpSettings', 'header',
                       'response', 'version',
@@ -1697,7 +1838,7 @@ export default function InboundFormModal({
                     <Input placeholder="1.1" />
                   </Form.Item>
                   <Form.Item
-                    label="Response status"
+                    label={t('pages.inbounds.form.responseStatus')}
                     name={[
                       'streamSettings', 'tcpSettings', 'header',
                       'response', 'status',
@@ -1706,7 +1847,7 @@ export default function InboundFormModal({
                     <Input placeholder="200" />
                   </Form.Item>
                   <Form.Item
-                    label="Response reason"
+                    label={t('pages.inbounds.form.responseReason')}
                     name={[
                       'streamSettings', 'tcpSettings', 'header',
                       'response', 'reason',
@@ -1715,7 +1856,7 @@ export default function InboundFormModal({
                     <Input placeholder="OK" />
                   </Form.Item>
                   <Form.Item
-                    label="Response headers"
+                    label={t('pages.inbounds.form.responseHeaders')}
                     name={[
                       'streamSettings', 'tcpSettings', 'header',
                       'response', 'headers',
@@ -1734,7 +1875,7 @@ export default function InboundFormModal({
         <>
           <Form.Item
             name={['streamSettings', 'wsSettings', 'acceptProxyProtocol']}
-            label="Proxy Protocol"
+            label={t('pages.inbounds.form.proxyProtocol')}
             valuePropName="checked"
           >
             <Switch />
@@ -1747,12 +1888,12 @@ export default function InboundFormModal({
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'wsSettings', 'heartbeatPeriod']}
-            label="Heartbeat Period"
+            label={t('pages.inbounds.form.heartbeatPeriod')}
           >
             <InputNumber min={0} />
           </Form.Item>
           <Form.Item
-            label="Headers"
+            label={t('pages.inbounds.form.headers')}
             name={['streamSettings', 'wsSettings', 'headers']}
           >
             <HeaderMapEditor mode="v1" />
@@ -1764,19 +1905,19 @@ export default function InboundFormModal({
         <>
           <Form.Item
             name={['streamSettings', 'grpcSettings', 'serviceName']}
-            label="Service Name"
+            label={t('pages.inbounds.form.serviceName')}
           >
             <Input />
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'grpcSettings', 'authority']}
-            label="Authority"
+            label={t('pages.inbounds.form.authority')}
           >
             <Input />
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'grpcSettings', 'multiMode']}
-            label="Multi Mode"
+            label={t('pages.inbounds.form.multiMode')}
             valuePropName="checked"
           >
             <Switch />
@@ -1792,7 +1933,7 @@ export default function InboundFormModal({
           <Form.Item name={['streamSettings', 'xhttpSettings', 'path']} label={t('path')}>
             <Input />
           </Form.Item>
-          <Form.Item name={['streamSettings', 'xhttpSettings', 'mode']} label="Mode">
+          <Form.Item name={['streamSettings', 'xhttpSettings', 'mode']} label={t('pages.inbounds.info.mode')}>
             <Select
               style={{ width: '50%' }}
               options={(['auto', 'packet-up', 'stream-up', 'stream-one'] as const).map((m) => ({
@@ -1805,13 +1946,13 @@ export default function InboundFormModal({
             <>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'scMaxBufferedPosts']}
-                label="Max Buffered Upload"
+                label={t('pages.inbounds.form.maxBufferedUpload')}
               >
                 <InputNumber />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'scMaxEachPostBytes']}
-                label="Max Upload Size (Byte)"
+                label={t('pages.inbounds.form.maxUploadSize')}
               >
                 <Input />
               </Form.Item>
@@ -1820,26 +1961,32 @@ export default function InboundFormModal({
           {xhttpMode === 'stream-up' && (
             <Form.Item
               name={['streamSettings', 'xhttpSettings', 'scStreamUpServerSecs']}
-              label="Stream-Up Server"
+              label={t('pages.inbounds.form.streamUpServer')}
             >
               <Input />
             </Form.Item>
           )}
           <Form.Item
             name={['streamSettings', 'xhttpSettings', 'serverMaxHeaderBytes']}
-            label="Server Max Header Bytes"
+            label={t('pages.inbounds.form.serverMaxHeaderBytes')}
           >
             <InputNumber min={0} placeholder="0 (default)" />
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'xhttpSettings', 'xPaddingBytes']}
-            label="Padding Bytes"
+            label={t('pages.inbounds.form.paddingBytes')}
           >
             <Input />
           </Form.Item>
           <Form.Item
+            name={['streamSettings', 'xhttpSettings', 'headers']}
+            label={t('pages.inbounds.form.headers')}
+          >
+            <HeaderMapEditor mode="v1" />
+          </Form.Item>
+          <Form.Item
             name={['streamSettings', 'xhttpSettings', 'uplinkHTTPMethod']}
-            label="Uplink HTTP Method"
+            label={t('pages.inbounds.form.uplinkHttpMethod')}
           >
             <Select
               options={[
@@ -1856,7 +2003,7 @@ export default function InboundFormModal({
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'xhttpSettings', 'xPaddingObfsMode']}
-            label="Padding Obfs Mode"
+            label={t('pages.inbounds.form.paddingObfsMode')}
             valuePropName="checked"
           >
             <Switch />
@@ -1865,19 +2012,19 @@ export default function InboundFormModal({
             <>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'xPaddingKey']}
-                label="Padding Key"
+                label={t('pages.inbounds.form.paddingKey')}
               >
                 <Input placeholder="x_padding" />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'xPaddingHeader']}
-                label="Padding Header"
+                label={t('pages.inbounds.form.paddingHeader')}
               >
                 <Input placeholder="X-Padding" />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'xPaddingPlacement']}
-                label="Padding Placement"
+                label={t('pages.inbounds.form.paddingPlacement')}
               >
                 <Select
                   options={[
@@ -1891,7 +2038,7 @@ export default function InboundFormModal({
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'xPaddingMethod']}
-                label="Padding Method"
+                label={t('pages.inbounds.form.paddingMethod')}
               >
                 <Select
                   options={[
@@ -1905,7 +2052,7 @@ export default function InboundFormModal({
           )}
           <Form.Item
             name={['streamSettings', 'xhttpSettings', 'sessionPlacement']}
-            label="Session Placement"
+            label={t('pages.inbounds.form.sessionPlacement')}
           >
             <Select
               options={[
@@ -1920,14 +2067,14 @@ export default function InboundFormModal({
           {xhttpSessionPlacement && xhttpSessionPlacement !== 'path' && (
             <Form.Item
               name={['streamSettings', 'xhttpSettings', 'sessionKey']}
-              label="Session Key"
+              label={t('pages.inbounds.form.sessionKey')}
             >
               <Input placeholder="x_session" />
             </Form.Item>
           )}
           <Form.Item
             name={['streamSettings', 'xhttpSettings', 'seqPlacement']}
-            label="Sequence Placement"
+            label={t('pages.inbounds.form.sequencePlacement')}
           >
             <Select
               options={[
@@ -1942,7 +2089,7 @@ export default function InboundFormModal({
           {xhttpSeqPlacement && xhttpSeqPlacement !== 'path' && (
             <Form.Item
               name={['streamSettings', 'xhttpSettings', 'seqKey']}
-              label="Sequence Key"
+              label={t('pages.inbounds.form.sequenceKey')}
             >
               <Input placeholder="x_seq" />
             </Form.Item>
@@ -1951,7 +2098,7 @@ export default function InboundFormModal({
             <>
               <Form.Item
                 name={['streamSettings', 'xhttpSettings', 'uplinkDataPlacement']}
-                label="Uplink Data Placement"
+                label={t('pages.inbounds.form.uplinkDataPlacement')}
               >
                 <Select
                   options={[
@@ -1966,7 +2113,7 @@ export default function InboundFormModal({
               {xhttpUplinkPlacement && xhttpUplinkPlacement !== 'body' && (
                 <Form.Item
                   name={['streamSettings', 'xhttpSettings', 'uplinkDataKey']}
-                  label="Uplink Data Key"
+                  label={t('pages.inbounds.form.uplinkDataKey')}
                 >
                   <Input placeholder="x_data" />
                 </Form.Item>
@@ -1975,7 +2122,7 @@ export default function InboundFormModal({
           )}
           <Form.Item
             name={['streamSettings', 'xhttpSettings', 'noSSEHeader']}
-            label="No SSE Header"
+            label={t('pages.inbounds.form.noSseHeader')}
             valuePropName="checked"
           >
             <Switch />
@@ -1987,7 +2134,7 @@ export default function InboundFormModal({
         <>
           <Form.Item
             name={['streamSettings', 'httpupgradeSettings', 'acceptProxyProtocol']}
-            label="Proxy Protocol"
+            label={t('pages.inbounds.form.proxyProtocol')}
             valuePropName="checked"
           >
             <Switch />
@@ -2005,7 +2152,7 @@ export default function InboundFormModal({
             <Input />
           </Form.Item>
           <Form.Item
-            label="Headers"
+            label={t('pages.inbounds.form.headers')}
             name={['streamSettings', 'httpupgradeSettings', 'headers']}
           >
             <HeaderMapEditor mode="v1" />
@@ -2018,24 +2165,24 @@ export default function InboundFormModal({
           <Form.Item name={['streamSettings', 'kcpSettings', 'mtu']} label="MTU">
             <InputNumber min={576} max={1460} />
           </Form.Item>
-          <Form.Item name={['streamSettings', 'kcpSettings', 'tti']} label="TTI (ms)">
+          <Form.Item name={['streamSettings', 'kcpSettings', 'tti']} label={t('pages.inbounds.form.ttiMs')}>
             <InputNumber min={10} max={100} />
           </Form.Item>
-          <Form.Item name={['streamSettings', 'kcpSettings', 'uplinkCapacity']} label="Uplink (MB/s)">
+          <Form.Item name={['streamSettings', 'kcpSettings', 'uplinkCapacity']} label={t('pages.inbounds.form.uplinkMbps')}>
             <InputNumber min={0} />
           </Form.Item>
-          <Form.Item name={['streamSettings', 'kcpSettings', 'downlinkCapacity']} label="Downlink (MB/s)">
+          <Form.Item name={['streamSettings', 'kcpSettings', 'downlinkCapacity']} label={t('pages.inbounds.form.downlinkMbps')}>
             <InputNumber min={0} />
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'kcpSettings', 'cwndMultiplier']}
-            label="CWND Multiplier"
+            label={t('pages.inbounds.form.cwndMultiplier')}
           >
             <InputNumber min={1} />
           </Form.Item>
           <Form.Item
             name={['streamSettings', 'kcpSettings', 'maxSendingWindow']}
-            label="Max Sending Window"
+            label={t('pages.inbounds.form.maxSendingWindow')}
           >
             <InputNumber min={0} />
           </Form.Item>
@@ -2055,7 +2202,7 @@ export default function InboundFormModal({
           const on = Array.isArray(arr) && arr.length > 0;
           return (
             <>
-              <Form.Item label="External Proxy">
+              <Form.Item label={t('pages.inbounds.form.externalProxy')}>
                 <Switch checked={on} onChange={toggleExternalProxy} />
               </Form.Item>
               {on && (
@@ -2121,14 +2268,14 @@ export default function InboundFormModal({
                                 return (
                                   <Space.Compact style={{ marginTop: 6 }} block>
                                     <Form.Item name={[field.name, 'sni']} noStyle>
-                                      <Input style={{ width: '30%' }} placeholder="SNI (defaults to host)" />
+                                      <Input style={{ width: '30%' }} placeholder={t('pages.inbounds.form.sniPlaceholder')} />
                                     </Form.Item>
                                     <Form.Item name={[field.name, 'fingerprint']} noStyle>
                                       <Select
                                         style={{ width: '30%' }}
-                                        placeholder="Fingerprint"
+                                        placeholder={t('pages.inbounds.form.fingerprint')}
                                         options={[
-                                          { value: '', label: 'Default' },
+                                          { value: '', label: t('pages.inbounds.form.defaultOption') },
                                           ...Object.values(UTLS_FINGERPRINT).map((fp) => ({
                                             value: fp,
                                             label: fp,
@@ -2181,74 +2328,74 @@ export default function InboundFormModal({
               </Form.Item>
               {on && (
                 <>
-                  <Form.Item name={['streamSettings', 'sockopt', 'mark']} label="Route Mark">
+                  <Form.Item name={['streamSettings', 'sockopt', 'mark']} label={t('pages.inbounds.form.routeMark')}>
                     <InputNumber min={0} />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpKeepAliveInterval']}
-                    label="TCP Keep Alive Interval"
+                    label={t('pages.inbounds.form.tcpKeepAliveInterval')}
                   >
                     <InputNumber min={0} />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpKeepAliveIdle']}
-                    label="TCP Keep Alive Idle"
+                    label={t('pages.inbounds.form.tcpKeepAliveIdle')}
                   >
                     <InputNumber min={0} />
                   </Form.Item>
-                  <Form.Item name={['streamSettings', 'sockopt', 'tcpMaxSeg']} label="TCP Max Seg">
+                  <Form.Item name={['streamSettings', 'sockopt', 'tcpMaxSeg']} label={t('pages.inbounds.form.tcpMaxSeg')}>
                     <InputNumber min={0} />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpUserTimeout']}
-                    label="TCP User Timeout"
+                    label={t('pages.inbounds.form.tcpUserTimeout')}
                   >
                     <InputNumber min={0} />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpWindowClamp']}
-                    label="TCP Window Clamp"
+                    label={t('pages.inbounds.form.tcpWindowClamp')}
                   >
                     <InputNumber min={0} />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'acceptProxyProtocol']}
-                    label="Proxy Protocol"
+                    label={t('pages.inbounds.form.proxyProtocol')}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpFastOpen']}
-                    label="TCP Fast Open"
+                    label={t('pages.inbounds.form.tcpFastOpen')}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpMptcp']}
-                    label="Multipath TCP"
+                    label={t('pages.inbounds.form.multipathTcp')}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'penetrate']}
-                    label="Penetrate"
+                    label={t('pages.inbounds.form.penetrate')}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'V6Only']}
-                    label="V6 Only"
+                    label={t('pages.inbounds.form.v6Only')}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'domainStrategy']}
-                    label="Domain Strategy"
+                    label={t('pages.xray.wireguard.domainStrategy')}
                   >
                     <Select
                       style={{ width: '50%' }}
@@ -2257,7 +2404,7 @@ export default function InboundFormModal({
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'tcpcongestion']}
-                    label="TCP Congestion"
+                    label={t('pages.inbounds.form.tcpCongestion')}
                   >
                     <Select
                       style={{ width: '50%' }}
@@ -2274,18 +2421,18 @@ export default function InboundFormModal({
                       ]}
                     />
                   </Form.Item>
-                  <Form.Item name={['streamSettings', 'sockopt', 'dialerProxy']} label="Dialer Proxy">
+                  <Form.Item name={['streamSettings', 'sockopt', 'dialerProxy']} label={t('pages.inbounds.form.dialerProxy')}>
                     <Input />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'interfaceName']}
-                    label="Interface Name"
+                    label={t('pages.inbounds.info.interfaceName')}
                   >
                     <Input />
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'trustedXForwardedFor']}
-                    label="Trusted X-Forwarded-For"
+                    label={t('pages.inbounds.form.trustedXForwardedFor')}
                   >
                     <Select
                       mode="tags"
@@ -2301,7 +2448,7 @@ export default function InboundFormModal({
                   </Form.Item>
                   <Form.Item
                     name={['streamSettings', 'sockopt', 'addressPortStrategy']}
-                    label="Address+port strategy"
+                    label={t('pages.inbounds.form.addressPortStrategy')}
                   >
                     <Select
                       style={{ width: '50%' }}
@@ -2329,26 +2476,26 @@ export default function InboundFormModal({
                             <>
                               <Form.Item
                                 name={['streamSettings', 'sockopt', 'happyEyeballs', 'tryDelayMs']}
-                                label="Try delay (ms)"
+                                label={t('pages.inbounds.form.tryDelayMs')}
                               >
                                 <InputNumber min={0} placeholder="0 disabled — 250 recommended" />
                               </Form.Item>
                               <Form.Item
                                 name={['streamSettings', 'sockopt', 'happyEyeballs', 'prioritizeIPv6']}
-                                label="Prioritize IPv6"
+                                label={t('pages.inbounds.form.prioritizeIPv6')}
                                 valuePropName="checked"
                               >
                                 <Switch />
                               </Form.Item>
                               <Form.Item
                                 name={['streamSettings', 'sockopt', 'happyEyeballs', 'interleave']}
-                                label="Interleave"
+                                label={t('pages.inbounds.form.interleave')}
                               >
                                 <InputNumber min={1} />
                               </Form.Item>
                               <Form.Item
                                 name={['streamSettings', 'sockopt', 'happyEyeballs', 'maxConcurrentTry']}
-                                label="Max concurrent try"
+                                label={t('pages.inbounds.form.maxConcurrentTry')}
                               >
                                 <InputNumber min={0} />
                               </Form.Item>
@@ -2361,13 +2508,13 @@ export default function InboundFormModal({
                   <Form.List name={['streamSettings', 'sockopt', 'customSockopt']}>
                     {(fields, { add, remove }) => (
                       <>
-                        <Form.Item label="Custom sockopt">
+                        <Form.Item label={t('pages.inbounds.form.customSockopt')}>
                           <Button
                             type="dashed"
                             size="small"
                             onClick={() => add({ type: 'int', level: '6', opt: '', value: '' })}
                           >
-                            + Add custom option
+                            + {t('pages.inbounds.form.addCustomOption')}
                           </Button>
                         </Form.Item>
                         {fields.map((field) => (
@@ -2452,9 +2599,9 @@ export default function InboundFormModal({
                 disabled={!tlsOk}
                 onChange={(e) => onSecurityChange(e.target.value)}
               >
-                {!tlsOnly && <Radio.Button value="none">none</Radio.Button>}
-                <Radio.Button value="tls">tls</Radio.Button>
-                {realityOk && <Radio.Button value="reality">reality</Radio.Button>}
+                {!tlsOnly && <Radio.Button value="none">{t('none')}</Radio.Button>}
+                <Radio.Button value="tls">TLS</Radio.Button>
+                {realityOk && <Radio.Button value="reality">Reality</Radio.Button>}
               </Radio.Group>
             );
           }}
@@ -2473,17 +2620,17 @@ export default function InboundFormModal({
           return (
             <>
               <Form.Item name={['streamSettings', 'tlsSettings', 'serverName']} label="SNI">
-                <Input placeholder="Server Name Indication" />
+                <Input placeholder={t('pages.inbounds.form.serverNameIndication')} />
               </Form.Item>
-              <Form.Item name={['streamSettings', 'tlsSettings', 'cipherSuites']} label="Cipher Suites">
+              <Form.Item name={['streamSettings', 'tlsSettings', 'cipherSuites']} label={t('pages.inbounds.form.cipherSuites')}>
                 <Select
                   options={[
-                    { value: '', label: 'Auto' },
+                    { value: '', label: t('pages.inbounds.form.autoOption') },
                     ...Object.entries(TLS_CIPHER_OPTION).map(([k, v]) => ({ value: v, label: k })),
                   ]}
                 />
               </Form.Item>
-              <Form.Item label="Min/Max Version">
+              <Form.Item label={t('pages.inbounds.form.minMaxVersion')}>
                 <Space.Compact block>
                   <Form.Item name={['streamSettings', 'tlsSettings', 'minVersion']} noStyle>
                     <Select
@@ -2520,21 +2667,21 @@ export default function InboundFormModal({
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'tlsSettings', 'rejectUnknownSni']}
-                label="Reject Unknown SNI"
+                label={t('pages.inbounds.form.rejectUnknownSni')}
                 valuePropName="checked"
               >
                 <Switch />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'tlsSettings', 'disableSystemRoot']}
-                label="Disable System Root"
+                label={t('pages.inbounds.form.disableSystemRoot')}
                 valuePropName="checked"
               >
                 <Switch />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'tlsSettings', 'enableSessionResumption']}
-                label="Session Resumption"
+                label={t('pages.inbounds.form.sessionResumption')}
                 valuePropName="checked"
               >
                 <Switch />
@@ -2583,7 +2730,7 @@ export default function InboundFormModal({
                               danger
                               onClick={() => remove(certField.name)}
                             >
-                              <MinusOutlined /> Remove
+                              <MinusOutlined /> {t('remove')}
                             </Button>
                           </Form.Item>
                         )}
@@ -2612,6 +2759,20 @@ export default function InboundFormModal({
                                   label={t('pages.inbounds.privatekey')}
                                 >
                                   <Input />
+                                </Form.Item>
+                                <Form.Item label=" ">
+                                  <Space>
+                                    <Button
+                                      type="primary"
+                                      loading={saving}
+                                      onClick={() => setCertFromPanel(certField.name)}
+                                    >
+                                      {t('pages.inbounds.setDefaultCert')}
+                                    </Button>
+                                    <Button danger onClick={() => clearCertFiles(certField.name)}>
+                                      {t('clear')}
+                                    </Button>
+                                  </Space>
                                 </Form.Item>
                               </>
                             ) : (
@@ -2646,14 +2807,14 @@ export default function InboundFormModal({
                         </Form.Item>
                         <Form.Item
                           name={[certField.name, 'oneTimeLoading']}
-                          label="One Time Loading"
+                          label={t('pages.inbounds.form.oneTimeLoading')}
                           valuePropName="checked"
                         >
                           <Switch />
                         </Form.Item>
                         <Form.Item
                           name={[certField.name, 'usage']}
-                          label="Usage Option"
+                          label={t('pages.inbounds.form.usageOption')}
                         >
                           <Select
                             style={{ width: '50%' }}
@@ -2676,7 +2837,7 @@ export default function InboundFormModal({
                             return (
                               <Form.Item
                                 name={[certField.name, 'buildChain']}
-                                label="Build Chain"
+                                label={t('pages.inbounds.form.buildChain')}
                                 valuePropName="checked"
                               >
                                 <Switch />
@@ -2690,21 +2851,44 @@ export default function InboundFormModal({
                 )}
               </Form.List>
 
-              <Form.Item name={['streamSettings', 'tlsSettings', 'echServerKeys']} label="ECH key">
+              <Form.Item name={['streamSettings', 'tlsSettings', 'echServerKeys']} label={t('pages.inbounds.form.echKey')}>
                 <Input />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'tlsSettings', 'settings', 'echConfigList']}
-                label="ECH config"
+                label={t('pages.inbounds.form.echConfig')}
               >
                 <Input />
+              </Form.Item>
+              <Form.Item
+                label={t('pages.inbounds.form.pinnedPeerCertSha256')}
+                tooltip={t('pages.inbounds.form.pinnedPeerCertSha256Tip')}
+              >
+                <Space.Compact block>
+                  <Form.Item
+                    name={['streamSettings', 'tlsSettings', 'settings', 'pinnedPeerCertSha256']}
+                    noStyle
+                  >
+                    <Select
+                      mode="tags"
+                      tokenSeparators={[',', ' ']}
+                      placeholder={t('pages.inbounds.form.pinnedPeerCertSha256Placeholder')}
+                      style={{ width: 'calc(100% - 32px)' }}
+                    />
+                  </Form.Item>
+                  <Button
+                    icon={<ReloadOutlined />}
+                    onClick={generateRandomPinHash}
+                    title={t('pages.inbounds.form.generateRandomPin')}
+                  />
+                </Space.Compact>
               </Form.Item>
               <Form.Item label=" ">
                 <Space>
                   <Button type="primary" loading={saving} onClick={getNewEchCert}>
-                    Get New ECH Cert
+                    {t('pages.inbounds.form.getNewEchCert')}
                   </Button>
-                  <Button danger onClick={clearEchCert}>Clear</Button>
+                  <Button danger onClick={clearEchCert}>{t('clear')}</Button>
                 </Space>
               </Form.Item>
             </>
@@ -2725,12 +2909,12 @@ export default function InboundFormModal({
             <>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'show']}
-                label="Show"
+                label={t('pages.inbounds.form.show')}
                 valuePropName="checked"
               >
                 <Switch />
               </Form.Item>
-              <Form.Item name={['streamSettings', 'realitySettings', 'xver']} label="Xver">
+              <Form.Item name={['streamSettings', 'realitySettings', 'xver']} label={t('pages.inbounds.form.xver')}>
                 <InputNumber min={0} />
               </Form.Item>
               <Form.Item
@@ -2741,60 +2925,57 @@ export default function InboundFormModal({
                   options={Object.values(UTLS_FINGERPRINT).map((fp) => ({ value: fp, label: fp }))}
                 />
               </Form.Item>
-              <Form.Item
-                name={['streamSettings', 'realitySettings', 'target']}
-                label={
-                  <>
-                    Target{' '}
-                    <SyncOutlined className="random-icon" onClick={randomizeRealityTarget} />
-                  </>
-                }
-              >
-                <Input />
+              <Form.Item label={t('pages.inbounds.form.target')}>
+                <Space.Compact block>
+                  <Form.Item name={['streamSettings', 'realitySettings', 'target']} noStyle>
+                    <Input style={{ width: 'calc(100% - 32px)' }} />
+                  </Form.Item>
+                  <Button icon={<ReloadOutlined />} onClick={randomizeRealityTarget} />
+                </Space.Compact>
               </Form.Item>
-              <Form.Item
-                name={['streamSettings', 'realitySettings', 'serverNames']}
-                label={
-                  <>
-                    SNI{' '}
-                    <SyncOutlined className="random-icon" onClick={randomizeRealityTarget} />
-                  </>
-                }
-              >
-                <Select mode="tags" tokenSeparators={[',']} style={{ width: '100%' }} />
+              <Form.Item label="SNI">
+                <Space.Compact block style={{ display: 'flex' }}>
+                  <Form.Item
+                    name={['streamSettings', 'realitySettings', 'serverNames']}
+                    noStyle
+                  >
+                    <Select mode="tags" tokenSeparators={[',']} style={{ flex: 1 }} />
+                  </Form.Item>
+                  <Button icon={<ReloadOutlined />} onClick={randomizeRealityTarget} />
+                </Space.Compact>
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'maxTimediff']}
-                label="Max Time Diff (ms)"
+                label={t('pages.inbounds.form.maxTimeDiff')}
               >
                 <InputNumber min={0} />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'minClientVer']}
-                label="Min Client Ver"
+                label={t('pages.inbounds.form.minClientVer')}
               >
                 <Input placeholder="25.9.11" />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'maxClientVer']}
-                label="Max Client Ver"
+                label={t('pages.inbounds.form.maxClientVer')}
               >
                 <Input placeholder="25.9.11" />
               </Form.Item>
-              <Form.Item
-                name={['streamSettings', 'realitySettings', 'shortIds']}
-                label={
-                  <>
-                    Short IDs{' '}
-                    <SyncOutlined className="random-icon" onClick={randomizeShortIds} />
-                  </>
-                }
-              >
-                <Select mode="tags" tokenSeparators={[',']} style={{ width: '100%' }} />
+              <Form.Item label={t('pages.inbounds.form.shortIds')}>
+                <Space.Compact block style={{ display: 'flex' }}>
+                  <Form.Item
+                    name={['streamSettings', 'realitySettings', 'shortIds']}
+                    noStyle
+                  >
+                    <Select mode="tags" tokenSeparators={[',']} style={{ flex: 1 }} />
+                  </Form.Item>
+                  <Button icon={<ReloadOutlined />} onClick={randomizeShortIds} />
+                </Space.Compact>
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'settings', 'spiderX']}
-                label="SpiderX"
+                label={t('pages.inbounds.form.spiderX')}
               >
                 <Input />
               </Form.Item>
@@ -2813,29 +2994,29 @@ export default function InboundFormModal({
               <Form.Item label=" ">
                 <Space>
                   <Button type="primary" loading={saving} onClick={genRealityKeypair}>
-                    Get New Cert
+                    {t('pages.inbounds.form.getNewCert')}
                   </Button>
-                  <Button danger onClick={clearRealityKeypair}>Clear</Button>
+                  <Button danger onClick={clearRealityKeypair}>{t('clear')}</Button>
                 </Space>
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'mldsa65Seed']}
-                label="mldsa65 Seed"
+                label={t('pages.inbounds.form.mldsa65Seed')}
               >
                 <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} />
               </Form.Item>
               <Form.Item
                 name={['streamSettings', 'realitySettings', 'settings', 'mldsa65Verify']}
-                label="mldsa65 Verify"
+                label={t('pages.inbounds.form.mldsa65Verify')}
               >
                 <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} />
               </Form.Item>
               <Form.Item label=" ">
                 <Space>
                   <Button type="primary" loading={saving} onClick={genMldsa65}>
-                    Get New Seed
+                    {t('pages.inbounds.form.getNewSeed')}
                   </Button>
-                  <Button danger onClick={clearMldsa65}>Clear</Button>
+                  <Button danger onClick={clearMldsa65}>{t('clear')}</Button>
                 </Space>
               </Form.Item>
             </>

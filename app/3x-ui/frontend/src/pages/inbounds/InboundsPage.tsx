@@ -38,6 +38,9 @@ import LazyMount from '@/components/LazyMount';
 const InboundFormModal = lazy(() => import('./InboundFormModal'));
 const InboundInfoModal = lazy(() => import('./InboundInfoModal'));
 const QrCodeModal = lazy(() => import('./QrCodeModal'));
+const AttachClientsModal = lazy(() => import('./AttachClientsModal'));
+const DetachClientsModal = lazy(() => import('./DetachClientsModal'));
+const AddClientsToGroupModal = lazy(() => import('./AddClientsToGroupModal'));
 
 type RowAction =
   | 'edit'
@@ -48,6 +51,10 @@ type RowAction =
   | 'clipboard'
   | 'delete'
   | 'resetTraffic'
+  | 'delAllClients'
+  | 'attachClients'
+  | 'detachClients'
+  | 'addToGroup'
   | 'clone';
 
 type GeneralAction = 'import' | 'export' | 'subs' | 'resetInbounds';
@@ -120,6 +127,14 @@ export default function InboundsPage() {
   const [qrOpen, setQrOpen] = useState(false);
   const [qrDbInbound, setQrDbInbound] = useState<DBInbound | null>(null);
 
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [attachSource, setAttachSource] = useState<DBInbound | null>(null);
+  const [detachOpen, setDetachOpen] = useState(false);
+  const [detachSource, setDetachSource] = useState<DBInbound | null>(null);
+
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [groupSource, setGroupSource] = useState<DBInbound | null>(null);
+
   const [textOpen, setTextOpen] = useState(false);
   const [textTitle, setTextTitle] = useState('');
   const [textContent, setTextContent] = useState('');
@@ -156,7 +171,7 @@ export default function InboundsPage() {
     confirm: (value: string) => Promise<boolean | void> | boolean | void;
   }) => {
     setPromptTitle(opts.title);
-    setPromptOkText(opts.okText || 'OK');
+    setPromptOkText(opts.okText || t('confirm'));
     setPromptType(opts.type || 'textarea');
     setPromptInitial(opts.value || '');
     setPromptHandler(() => opts.confirm);
@@ -279,7 +294,7 @@ export default function InboundsPage() {
         fallbackHostname: window.location.hostname,
       }));
     }
-    openText({ title: t('pages.inbounds.exportAllLinksTitle'), content: out.join('\r\n'), fileName: 'All-Inbounds' });
+    openText({ title: t('pages.inbounds.exportAllLinksTitle'), content: out.join('\r\n'), fileName: t('pages.inbounds.exportAllLinksFileName') });
   }, [dbInbounds, hydrateInbound, checkFallback, remarkModel, hostOverrideFor, openText, t]);
 
   const exportAllSubs = useCallback(async () => {
@@ -296,13 +311,13 @@ export default function InboundsPage() {
         }
       }
     }
-    openText({ title: t('pages.inbounds.exportAllSubsTitle'), content: [...new Set(out)].join('\r\n'), fileName: 'All-Inbounds-Subs' });
+    openText({ title: t('pages.inbounds.exportAllSubsTitle'), content: [...new Set(out)].join('\r\n'), fileName: t('pages.inbounds.exportAllSubsFileName') });
   }, [dbInbounds, hydrateInbound, subSettings, openText, t]);
 
   const importInbound = useCallback(() => {
     openPrompt({
-      title: 'Import inbound',
-      okText: 'Import',
+      title: t('pages.inbounds.importInbound'),
+      okText: t('pages.inbounds.import'),
       type: 'textarea',
       value: '',
       confirm: async (value) => {
@@ -355,6 +370,21 @@ export default function InboundsPage() {
     });
   }, [modal, refresh, t]);
 
+  const confirmDelAllClients = useCallback((dbInbound: DBInbound) => {
+    const count = clientCount[dbInbound.id]?.clients || 0;
+    modal.confirm({
+      title: t('pages.inbounds.delAllClientsConfirmTitle', { remark: dbInbound.remark, count }),
+      content: t('pages.inbounds.delAllClientsConfirmContent'),
+      okText: t('delete'),
+      okType: 'danger',
+      cancelText: t('cancel'),
+      onOk: async () => {
+        const msg = await HttpUtil.post(`/panel/api/inbounds/${dbInbound.id}/delAllClients`);
+        if (msg?.success) await refresh();
+      },
+    });
+  }, [modal, refresh, t, clientCount]);
+
   const confirmClone = useCallback((dbInbound: DBInbound) => {
     modal.confirm({
       title: t('pages.inbounds.cloneConfirmTitle', { remark: dbInbound.remark }),
@@ -404,9 +434,9 @@ export default function InboundsPage() {
       case 'subs': exportAllSubs(); break;
       case 'resetInbounds':
         modal.confirm({
-          title: 'Reset all inbound traffic?',
-          okText: 'Reset',
-          cancelText: 'Cancel',
+          title: t('pages.inbounds.resetAllTrafficTitle'),
+          okText: t('reset'),
+          cancelText: t('cancel'),
           onOk: async () => {
             const msg = await HttpUtil.post('/panel/api/inbounds/resetAllTraffics');
             if (msg?.success) await refresh();
@@ -422,7 +452,7 @@ export default function InboundsPage() {
     // Actions that touch per-client secrets (uuid, password, flow, ...) need
     // the full payload that the slim list view does not ship. Hydrate first
     // and then operate on the rehydrated record.
-    const hydratingKeys: RowAction[] = ['edit', 'showInfo', 'qrcode', 'export', 'subs', 'clipboard', 'clone'];
+    const hydratingKeys: RowAction[] = ['edit', 'showInfo', 'qrcode', 'export', 'subs', 'clipboard', 'clone', 'attachClients', 'addToGroup'];
     let target = dbInbound;
     if (hydratingKeys.includes(key)) {
       const hydrated = await hydrateInbound(dbInbound.id);
@@ -456,13 +486,28 @@ export default function InboundsPage() {
       case 'resetTraffic':
         confirmResetTraffic(target);
         break;
+      case 'delAllClients':
+        confirmDelAllClients(target);
+        break;
+      case 'attachClients':
+        setAttachSource(target);
+        setAttachOpen(true);
+        break;
+      case 'detachClients':
+        setDetachSource(target);
+        setDetachOpen(true);
+        break;
+      case 'addToGroup':
+        setGroupSource(target);
+        setGroupOpen(true);
+        break;
       case 'clone':
         confirmClone(target);
         break;
       default:
         messageApi.info(`Action "${key}" — coming in a later 5f subphase`);
     }
-  }, [hydrateInbound, openEdit, checkFallback, findClientIndex, exportInboundLinks, exportInboundSubs, exportInboundClipboard, confirmDelete, confirmResetTraffic, confirmClone, messageApi]);
+  }, [hydrateInbound, openEdit, checkFallback, findClientIndex, exportInboundLinks, exportInboundSubs, exportInboundClipboard, confirmDelete, confirmResetTraffic, confirmDelAllClients, confirmClone, messageApi]);
 
   return (
     <ConfigProvider theme={antdThemeConfig}>
@@ -473,7 +518,7 @@ export default function InboundsPage() {
 
         <Layout className="content-shell">
           <Layout.Content id="content-layout" className="content-area">
-            <Spin spinning={!fetched} delay={200} description="Loading…" size="large">
+            <Spin spinning={!fetched} delay={200} description={t('loading')} size="large">
               {!fetched ? (
                 <div className="loading-spacer" />
               ) : (
@@ -566,6 +611,31 @@ export default function InboundsPage() {
             remarkModel={remarkModel}
             nodeAddress={qrNodeAddress}
             subSettings={subSettings}
+          />
+        </LazyMount>
+        <LazyMount when={attachOpen}>
+          <AttachClientsModal
+            open={attachOpen}
+            onClose={() => setAttachOpen(false)}
+            onAttached={refresh}
+            source={attachSource}
+            dbInbounds={dbInbounds}
+          />
+        </LazyMount>
+        <LazyMount when={detachOpen}>
+          <DetachClientsModal
+            open={detachOpen}
+            onClose={() => setDetachOpen(false)}
+            onDetached={refresh}
+            source={detachSource}
+          />
+        </LazyMount>
+        <LazyMount when={groupOpen}>
+          <AddClientsToGroupModal
+            open={groupOpen}
+            onClose={() => setGroupOpen(false)}
+            onAdded={refresh}
+            source={groupSource}
           />
         </LazyMount>
 

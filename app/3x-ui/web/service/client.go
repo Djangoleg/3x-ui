@@ -237,15 +237,23 @@ func (s *ClientService) SyncInbound(tx *gorm.DB, inboundId int, clients []model.
 			row.ExpiryTime = incoming.ExpiryTime
 			row.Enable = incoming.Enable
 			row.TgID = incoming.TgID
+			row.Group = incoming.Group
 			row.Comment = incoming.Comment
 			row.Reset = incoming.Reset
 			if incoming.CreatedAt > 0 && (row.CreatedAt == 0 || incoming.CreatedAt < row.CreatedAt) {
 				row.CreatedAt = incoming.CreatedAt
 			}
-			if incoming.UpdatedAt > row.UpdatedAt {
-				row.UpdatedAt = incoming.UpdatedAt
+			preservedUpdatedAt := row.UpdatedAt
+			if incoming.UpdatedAt > preservedUpdatedAt {
+				preservedUpdatedAt = incoming.UpdatedAt
 			}
+			row.UpdatedAt = preservedUpdatedAt
 			if err := tx.Save(row).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&model.ClientRecord{}).
+				Where("id = ?", row.Id).
+				UpdateColumn("updated_at", preservedUpdatedAt).Error; err != nil {
 				return err
 			}
 		}
@@ -291,9 +299,7 @@ func (s *ClientService) ListForInbound(tx *gorm.DB, inboundId int) ([]model.Clie
 	out := make([]model.Client, 0, len(rows))
 	for i := range rows {
 		c := rows[i].ToClient()
-		if rows[i].FlowOverride != "" {
-			c.Flow = rows[i].FlowOverride
-		}
+		c.Flow = rows[i].FlowOverride
 		out = append(out, *c)
 	}
 	return out, nil
@@ -447,7 +453,7 @@ func (s *ClientService) Create(inboundSvc *InboundService, payload *ClientCreate
 		if err := s.fillProtocolDefaults(&client, inbound); err != nil {
 			return needRestart, err
 		}
-		settingsPayload, mErr := json.Marshal(map[string][]model.Client{"clients": {client}})
+		settingsPayload, mErr := json.Marshal(map[string][]model.Client{"clients": {clientWithInboundFlow(client, inbound)}})
 		if mErr != nil {
 			return needRestart, mErr
 		}
@@ -488,8 +494,13 @@ func (s *ClientService) fillProtocolDefaults(c *model.Client, ib *model.Inbound)
 	return nil
 }
 
-// shadowsocksMethodFromSettings pulls the "method" field out of the inbound's
-// settings JSON. Returns "" when the field is missing or settings is invalid.
+func clientWithInboundFlow(c model.Client, ib *model.Inbound) model.Client {
+	if !inboundCanEnableTlsFlow(string(ib.Protocol), ib.StreamSettings) {
+		c.Flow = ""
+	}
+	return c
+}
+
 func shadowsocksMethodFromSettings(settings string) string {
 	if settings == "" {
 		return ""
@@ -502,11 +513,6 @@ func shadowsocksMethodFromSettings(settings string) string {
 	return method
 }
 
-// randomShadowsocksClientKey returns a per-client key sized to the cipher.
-// The 2022-blake3 ciphers require a base64-encoded key of an exact byte
-// length (16 bytes for aes-128-gcm, 32 bytes for aes-256-gcm and
-// chacha20-poly1305) — anything else fails with "bad key" on xray start.
-// Older ciphers accept arbitrary passwords, so we keep the uuid-style.
 func randomShadowsocksClientKey(method string) string {
 	if n := shadowsocksKeyBytes(method); n > 0 {
 		return random.Base64Bytes(n)
@@ -514,9 +520,6 @@ func randomShadowsocksClientKey(method string) string {
 	return strings.ReplaceAll(uuid.NewString(), "-", "")
 }
 
-// validShadowsocksClientKey reports whether key is acceptable for the cipher.
-// For 2022-blake3 it must decode to the exact byte length the cipher needs;
-// any other method accepts any non-empty string.
 func validShadowsocksClientKey(method, key string) bool {
 	n := shadowsocksKeyBytes(method)
 	if n == 0 {
@@ -539,13 +542,6 @@ func shadowsocksKeyBytes(method string) int {
 	return 0
 }
 
-// applyShadowsocksClientMethod normalises the per-client "method" field
-// when an inbound is created or updated:
-//   - Legacy ciphers: backfill `method` so xray's multi-user code is happy.
-//     "unsupported cipher method:" otherwise.
-//   - 2022-blake3-*: strip the per-client `method` because xray rejects
-//     it with "users must have empty method". This matters after an admin
-//     switches an existing inbound from a legacy cipher to a 2022 one.
 func applyShadowsocksClientMethod(clients []any, settings map[string]any) {
 	method, _ := settings["method"].(string)
 	is2022 := strings.HasPrefix(method, "2022-blake3-")
@@ -596,10 +592,6 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 		updated.CreatedAt = existing.CreatedAt
 	}
 
-	// Rename the ClientRecord row up front when the email changes. SyncInbound
-	// (invoked from UpdateInboundClient below) looks up by email — without
-	// renaming first it would treat the new email as a brand-new client,
-	// insert a duplicate ClientRecord, and leave the original orphaned.
 	if updated.Email != existing.Email {
 		var collisionCount int64
 		if err := database.GetDB().Model(&model.ClientRecord{}).
@@ -621,6 +613,14 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 	for _, ibId := range inboundIds {
 		inbound, getErr := inboundSvc.GetInbound(ibId)
 		if getErr != nil {
+			if errors.Is(getErr, gorm.ErrRecordNotFound) {
+				if err := database.GetDB().
+					Where("client_id = ? AND inbound_id = ?", id, ibId).
+					Delete(&model.ClientInbound{}).Error; err != nil {
+					return needRestart, err
+				}
+				continue
+			}
 			return needRestart, getErr
 		}
 		oldKey := clientKeyForProtocol(inbound.Protocol, existing)
@@ -630,7 +630,7 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 		if err := s.fillProtocolDefaults(&updated, inbound); err != nil {
 			return needRestart, err
 		}
-		settingsPayload, mErr := json.Marshal(map[string][]model.Client{"clients": {updated}})
+		settingsPayload, mErr := json.Marshal(map[string][]model.Client{"clients": {clientWithInboundFlow(updated, inbound)}})
 		if mErr != nil {
 			return needRestart, mErr
 		}
@@ -648,7 +648,7 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 
 	if err := database.GetDB().Model(&model.ClientRecord{}).
 		Where("id = ?", id).
-		Update("updated_at", updated.UpdatedAt).Error; err != nil {
+		UpdateColumn("updated_at", time.Now().UnixMilli()).Error; err != nil {
 		return needRestart, err
 	}
 	return needRestart, nil
@@ -670,13 +670,16 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 	for _, ibId := range inboundIds {
 		inbound, getErr := inboundSvc.GetInbound(ibId)
 		if getErr != nil {
+			if errors.Is(getErr, gorm.ErrRecordNotFound) {
+				continue
+			}
 			return needRestart, getErr
 		}
 		key := clientKeyForProtocol(inbound.Protocol, existing)
 		if key == "" {
 			continue
 		}
-		nr, delErr := s.DelInboundClient(inboundSvc, ibId, key)
+		nr, delErr := s.DelInboundClient(inboundSvc, ibId, key, false)
 		if delErr != nil {
 			return needRestart, delErr
 		}
@@ -733,7 +736,7 @@ func (s *ClientService) Attach(inboundSvc *InboundService, id int, inboundIds []
 		if err := s.fillProtocolDefaults(&copyClient, inbound); err != nil {
 			return needRestart, err
 		}
-		settingsPayload, mErr := json.Marshal(map[string][]model.Client{"clients": {copyClient}})
+		settingsPayload, mErr := json.Marshal(map[string][]model.Client{"clients": {clientWithInboundFlow(copyClient, inbound)}})
 		if mErr != nil {
 			return needRestart, mErr
 		}
@@ -780,6 +783,180 @@ func (s *ClientService) AttachByEmail(inboundSvc *InboundService, email string, 
 	return s.Attach(inboundSvc, rec.Id, inboundIds)
 }
 
+// BulkAttachResult reports the outcome of a bulk attach across target inbounds.
+type BulkAttachResult struct {
+	Attached []string `json:"attached"`
+	Skipped  []string `json:"skipped"`
+	Errors   []string `json:"errors"`
+}
+
+// BulkAttach attaches the given existing clients (by email) to each target inbound,
+// reusing their identity (email/UUID/password/subId) and a shared traffic row. It adds
+// all clients to a target in a single AddInboundClient call, and reports clients already
+// present on a target as skipped.
+func (s *ClientService) BulkAttach(inboundSvc *InboundService, emails []string, inboundIds []int) (*BulkAttachResult, bool, error) {
+	result := &BulkAttachResult{}
+	if len(emails) == 0 || len(inboundIds) == 0 {
+		return result, false, nil
+	}
+
+	recordErr := func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		result.Errors = append(result.Errors, msg)
+		logger.Warningf("[BulkAttach] %s", msg)
+	}
+
+	records := make([]*model.ClientRecord, 0, len(emails))
+	seenEmail := make(map[string]struct{}, len(emails))
+	for _, email := range emails {
+		if email == "" {
+			continue
+		}
+		key := strings.ToLower(email)
+		if _, ok := seenEmail[key]; ok {
+			continue
+		}
+		seenEmail[key] = struct{}{}
+		rec, err := s.GetRecordByEmail(nil, email)
+		if err != nil {
+			recordErr("%s: %v", email, err)
+			continue
+		}
+		records = append(records, rec)
+	}
+
+	needRestart := false
+	for _, ibId := range inboundIds {
+		inbound, err := inboundSvc.GetInbound(ibId)
+		if err != nil {
+			recordErr("inbound %d: %v", ibId, err)
+			continue
+		}
+		existingClients, err := inboundSvc.GetClients(inbound)
+		if err != nil {
+			recordErr("inbound %d: %v", ibId, err)
+			continue
+		}
+		have := make(map[string]struct{}, len(existingClients))
+		for _, c := range existingClients {
+			have[strings.ToLower(c.Email)] = struct{}{}
+		}
+
+		clientsToAdd := make([]model.Client, 0, len(records))
+		for _, rec := range records {
+			if _, attached := have[strings.ToLower(rec.Email)]; attached {
+				result.Skipped = append(result.Skipped, rec.Email)
+				continue
+			}
+			client := *rec.ToClient()
+			client.UpdatedAt = time.Now().UnixMilli()
+			if err := s.fillProtocolDefaults(&client, inbound); err != nil {
+				recordErr("%s -> inbound %d: %v", rec.Email, ibId, err)
+				continue
+			}
+			clientsToAdd = append(clientsToAdd, clientWithInboundFlow(client, inbound))
+		}
+
+		if len(clientsToAdd) == 0 {
+			continue
+		}
+
+		payload, err := json.Marshal(map[string][]model.Client{"clients": clientsToAdd})
+		if err != nil {
+			recordErr("inbound %d: %v", ibId, err)
+			continue
+		}
+		nr, err := s.AddInboundClient(inboundSvc, &model.Inbound{Id: ibId, Settings: string(payload)})
+		if err != nil {
+			recordErr("inbound %d: %v", ibId, err)
+			continue
+		}
+		if nr {
+			needRestart = true
+		}
+		for _, c := range clientsToAdd {
+			result.Attached = append(result.Attached, c.Email)
+		}
+	}
+
+	return result, needRestart, nil
+}
+
+// BulkDetachResult reports the outcome of a bulk detach across target inbounds.
+type BulkDetachResult struct {
+	Detached []string `json:"detached"`
+	Skipped  []string `json:"skipped"`
+	Errors   []string `json:"errors"`
+}
+
+// BulkDetach detaches the given existing clients (by email) from each target inbound.
+// (email, inbound) pairs where the client is not currently attached are silently skipped
+// at the inbound level; emails that aren't attached to any of the requested inbounds
+// are reported under skipped. ClientRecord rows are kept even when they become orphaned
+// (matches single-client detach semantics); callers should use bulkDelete for full removal.
+func (s *ClientService) BulkDetach(inboundSvc *InboundService, emails []string, inboundIds []int) (*BulkDetachResult, bool, error) {
+	result := &BulkDetachResult{}
+	if len(emails) == 0 || len(inboundIds) == 0 {
+		return result, false, nil
+	}
+
+	recordErr := func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		result.Errors = append(result.Errors, msg)
+		logger.Warningf("[BulkDetach] %s", msg)
+	}
+
+	requested := make(map[int]struct{}, len(inboundIds))
+	for _, id := range inboundIds {
+		requested[id] = struct{}{}
+	}
+
+	needRestart := false
+	seenEmail := make(map[string]struct{}, len(emails))
+	for _, email := range emails {
+		if email == "" {
+			continue
+		}
+		key := strings.ToLower(email)
+		if _, ok := seenEmail[key]; ok {
+			continue
+		}
+		seenEmail[key] = struct{}{}
+
+		rec, err := s.GetRecordByEmail(nil, email)
+		if err != nil {
+			recordErr("%s: %v", email, err)
+			continue
+		}
+		currentIds, err := s.GetInboundIdsForRecord(rec.Id)
+		if err != nil {
+			recordErr("%s: %v", email, err)
+			continue
+		}
+		intersection := make([]int, 0, len(currentIds))
+		for _, id := range currentIds {
+			if _, ok := requested[id]; ok {
+				intersection = append(intersection, id)
+			}
+		}
+		if len(intersection) == 0 {
+			result.Skipped = append(result.Skipped, rec.Email)
+			continue
+		}
+		nr, err := s.Detach(inboundSvc, rec.Id, intersection)
+		if err != nil {
+			recordErr("%s: %v", rec.Email, err)
+			continue
+		}
+		if nr {
+			needRestart = true
+		}
+		result.Detached = append(result.Detached, rec.Email)
+	}
+
+	return result, needRestart, nil
+}
+
 func (s *ClientService) DetachByEmailMany(inboundSvc *InboundService, email string, inboundIds []int) (bool, error) {
 	if email == "" {
 		return false, common.NewError("client email is required")
@@ -796,10 +973,74 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 		return false, common.NewError("client email is required")
 	}
 	rec, err := s.GetRecordByEmail(nil, email)
-	if err != nil {
+	if err == nil {
+		return s.Delete(inboundSvc, rec.Id, keepTraffic)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, err
 	}
-	return s.Delete(inboundSvc, rec.Id, keepTraffic)
+	inboundIds, idsErr := s.findInboundIdsByClientEmail(email)
+	if idsErr != nil {
+		return false, idsErr
+	}
+	if len(inboundIds) == 0 {
+		return false, common.NewError(fmt.Sprintf("client %q not found in any inbound or client record", email))
+	}
+	needRestart := false
+	for _, ibId := range inboundIds {
+		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, email, false)
+		if delErr != nil {
+			return needRestart, delErr
+		}
+		if nr {
+			needRestart = true
+		}
+	}
+	if !keepTraffic {
+		db := database.GetDB()
+		if err := db.Where("email = ?", email).Delete(&xray.ClientTraffic{}).Error; err != nil {
+			return needRestart, err
+		}
+		if err := db.Where("client_email = ?", email).Delete(&model.InboundClientIps{}).Error; err != nil {
+			return needRestart, err
+		}
+	}
+	return needRestart, nil
+}
+
+// findInboundIdsByClientEmail returns every inbound whose settings.clients[]
+// JSON contains an entry with the given email. Driver-portable (no JSON
+// operators) by parsing in Go — fine for the rare fallback path.
+func (s *ClientService) findInboundIdsByClientEmail(email string) ([]int, error) {
+	var inbounds []model.Inbound
+	if err := database.GetDB().
+		Select("id, settings").
+		Where("settings LIKE ?", "%"+email+"%").
+		Find(&inbounds).Error; err != nil {
+		return nil, err
+	}
+	out := make([]int, 0, len(inbounds))
+	for _, ib := range inbounds {
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(ib.Settings), &settings); err != nil {
+			continue
+		}
+		clients, ok := settings["clients"].([]any)
+		if !ok {
+			continue
+		}
+		for _, c := range clients {
+			cm, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cEmail, _ := cm["email"].(string); cEmail == email {
+				out = append(out, ib.Id)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func (s *ClientService) UpdateByEmail(inboundSvc *InboundService, email string, updated model.Client) (bool, error) {
@@ -856,6 +1097,7 @@ type ClientSlim struct {
 	ExpiryTime int64               `json:"expiryTime"`
 	LimitIP    int                 `json:"limitIp"`
 	Reset      int                 `json:"reset"`
+	Group      string              `json:"group,omitempty"`
 	Comment    string              `json:"comment,omitempty"`
 	InboundIds []int               `json:"inboundIds"`
 	Traffic    *xray.ClientTraffic `json:"traffic,omitempty"`
@@ -887,6 +1129,7 @@ type ClientPageParams struct {
 	AutoRenew  string `form:"autoRenew"`
 	HasTgID    string `form:"hasTgId"`
 	HasComment string `form:"hasComment"`
+	Group      string `form:"group"`
 }
 
 // ClientPageResponse is the shape returned by ListPaged. `Total` is the
@@ -901,6 +1144,7 @@ type ClientPageResponse struct {
 	Page     int            `json:"page"`
 	PageSize int            `json:"pageSize"`
 	Summary  ClientsSummary `json:"summary"`
+	Groups   []string       `json:"groups"`
 }
 
 // ClientsSummary collects per-bucket counts plus the matching email lists so
@@ -1010,6 +1254,9 @@ func (s *ClientService) ListPaged(inboundSvc *InboundService, settingSvc *Settin
 		if !clientMatchesHasComment(c, params.HasComment) {
 			continue
 		}
+		if !clientMatchesAnyGroup(c, params.Group) {
+			continue
+		}
 		filtered = append(filtered, c)
 	}
 
@@ -1031,6 +1278,15 @@ func (s *ClientService) ListPaged(inboundSvc *InboundService, settingSvc *Settin
 		items = append(items, toClientSlim(c))
 	}
 
+	groupRows, gErr := s.ListGroups()
+	if gErr != nil {
+		return nil, gErr
+	}
+	groups := make([]string, 0, len(groupRows))
+	for _, g := range groupRows {
+		groups = append(groups, g.Name)
+	}
+
 	return &ClientPageResponse{
 		Items:    items,
 		Total:    total,
@@ -1038,7 +1294,323 @@ func (s *ClientService) ListPaged(inboundSvc *InboundService, settingSvc *Settin
 		Page:     page,
 		PageSize: pageSize,
 		Summary:  summary,
+		Groups:   groups,
 	}, nil
+}
+
+type GroupSummary struct {
+	Name        string `json:"name"`
+	ClientCount int    `json:"clientCount"`
+}
+
+func (s *ClientService) ListGroups() ([]GroupSummary, error) {
+	db := database.GetDB()
+	var derived []GroupSummary
+	if err := db.Model(&model.ClientRecord{}).
+		Select("group_name AS name, COUNT(*) AS client_count").
+		Where("group_name <> ''").
+		Group("group_name").
+		Scan(&derived).Error; err != nil {
+		return nil, err
+	}
+	var stored []model.ClientGroup
+	if err := db.Find(&stored).Error; err != nil {
+		return nil, err
+	}
+	merged := make(map[string]int, len(derived)+len(stored))
+	for _, g := range stored {
+		merged[g.Name] = 0
+	}
+	for _, g := range derived {
+		merged[g.Name] = g.ClientCount
+	}
+	out := make([]GroupSummary, 0, len(merged))
+	for name, count := range merged {
+		out = append(out, GroupSummary{Name: name, ClientCount: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out, nil
+}
+
+func (s *ClientService) EmailsByGroup(name string) ([]string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return []string{}, nil
+	}
+	db := database.GetDB()
+	var emails []string
+	if err := db.Model(&model.ClientRecord{}).
+		Where("group_name = ?", name).
+		Order("email ASC").
+		Pluck("email", &emails).Error; err != nil {
+		return nil, err
+	}
+	if emails == nil {
+		emails = []string{}
+	}
+	return emails, nil
+}
+
+func (s *ClientService) BulkResetTraffic(inboundSvc *InboundService, emails []string) (int, error) {
+	if len(emails) == 0 {
+		return 0, nil
+	}
+	count := 0
+	for _, email := range emails {
+		if _, err := s.ResetTrafficByEmail(inboundSvc, email); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
+}
+
+func (s *ClientService) CreateGroup(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return common.NewError("group name is required")
+	}
+	db := database.GetDB()
+	var count int64
+	if err := db.Model(&model.ClientGroup{}).Where("name = ?", name).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return common.NewError("group already exists")
+	}
+	return db.Create(&model.ClientGroup{Name: name}).Error
+}
+
+func (s *ClientService) RenameGroup(oldName, newName string) (int, error) {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" {
+		return 0, common.NewError("old group name is required")
+	}
+	if newName == "" {
+		return 0, common.NewError("new group name is required")
+	}
+	if oldName == newName {
+		return 0, nil
+	}
+	return s.replaceGroupValue(oldName, newName)
+}
+
+func (s *ClientService) DeleteGroup(name string) (int, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0, common.NewError("group name is required")
+	}
+	return s.replaceGroupValue(name, "")
+}
+
+func (s *ClientService) RemoveFromGroup(emails []string) (int, error) {
+	return s.AddToGroup(emails, "")
+}
+
+func (s *ClientService) AddToGroup(emails []string, group string) (int, error) {
+	group = strings.TrimSpace(group)
+	if len(emails) == 0 {
+		return 0, nil
+	}
+	db := database.GetDB()
+
+	if group != "" {
+		var exists int64
+		if err := db.Model(&model.ClientGroup{}).Where("name = ?", group).Count(&exists).Error; err != nil {
+			return 0, err
+		}
+		if exists == 0 {
+			var derived int64
+			if err := db.Model(&model.ClientRecord{}).Where("group_name = ?", group).Count(&derived).Error; err != nil {
+				return 0, err
+			}
+			if derived == 0 {
+				if err := db.Create(&model.ClientGroup{Name: group}).Error; err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+
+	var records []model.ClientRecord
+	if err := db.Where("email IN ?", emails).Find(&records).Error; err != nil {
+		return 0, err
+	}
+	if len(records) == 0 {
+		return 0, nil
+	}
+	affectedEmails := make([]string, 0, len(records))
+	for _, r := range records {
+		affectedEmails = append(affectedEmails, r.Email)
+	}
+
+	tx := db.Begin()
+	if err := tx.Model(&model.ClientRecord{}).
+		Where("email IN ?", affectedEmails).
+		UpdateColumn("group_name", group).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	var inboundIDs []int
+	if err := tx.Table("client_inbounds").
+		Joins("JOIN clients ON clients.id = client_inbounds.client_id").
+		Where("clients.email IN ?", affectedEmails).
+		Distinct("client_inbounds.inbound_id").
+		Pluck("inbound_id", &inboundIDs).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	emailSet := make(map[string]struct{}, len(affectedEmails))
+	for _, e := range affectedEmails {
+		emailSet[e] = struct{}{}
+	}
+
+	for _, ibID := range inboundIDs {
+		var ib model.Inbound
+		if err := tx.First(&ib, ibID).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(ib.Settings), &settings); err != nil {
+			continue
+		}
+		clients, ok := settings["clients"].([]any)
+		if !ok {
+			continue
+		}
+		modified := false
+		for i := range clients {
+			cm, ok := clients[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			email, _ := cm["email"].(string)
+			if _, hit := emailSet[email]; !hit {
+				continue
+			}
+			if group == "" {
+				delete(cm, "group")
+			} else {
+				cm["group"] = group
+			}
+			clients[i] = cm
+			modified = true
+		}
+		if modified {
+			settings["clients"] = clients
+			newSettings, err := json.Marshal(settings)
+			if err != nil {
+				continue
+			}
+			ib.Settings = string(newSettings)
+			if err := tx.Save(&ib).Error; err != nil {
+				tx.Rollback()
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
+	}
+	return len(records), nil
+}
+
+func (s *ClientService) replaceGroupValue(oldName, newName string) (int, error) {
+	db := database.GetDB()
+	if newName == "" {
+		if err := db.Where("name = ?", oldName).Delete(&model.ClientGroup{}).Error; err != nil {
+			return 0, err
+		}
+	} else {
+		if err := db.Model(&model.ClientGroup{}).Where("name = ?", oldName).Update("name", newName).Error; err != nil {
+			return 0, err
+		}
+	}
+	var records []model.ClientRecord
+	if err := db.Where("group_name = ?", oldName).Find(&records).Error; err != nil {
+		return 0, err
+	}
+	if len(records) == 0 {
+		return 0, nil
+	}
+	affectedEmails := make([]string, 0, len(records))
+	for _, r := range records {
+		affectedEmails = append(affectedEmails, r.Email)
+	}
+
+	tx := db.Begin()
+	if err := tx.Model(&model.ClientRecord{}).
+		Where("group_name = ?", oldName).
+		UpdateColumn("group_name", newName).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	var inboundIDs []int
+	if err := tx.Table("client_inbounds").
+		Joins("JOIN clients ON clients.id = client_inbounds.client_id").
+		Where("clients.email IN ?", affectedEmails).
+		Distinct("client_inbounds.inbound_id").
+		Pluck("inbound_id", &inboundIDs).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	for _, ibID := range inboundIDs {
+		var ib model.Inbound
+		if err := tx.First(&ib, ibID).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(ib.Settings), &settings); err != nil {
+			continue
+		}
+		clients, ok := settings["clients"].([]any)
+		if !ok {
+			continue
+		}
+		modified := false
+		for i := range clients {
+			cm, ok := clients[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			if g, ok := cm["group"].(string); ok && g == oldName {
+				if newName == "" {
+					delete(cm, "group")
+				} else {
+					cm["group"] = newName
+				}
+				clients[i] = cm
+				modified = true
+			}
+		}
+		if modified {
+			settings["clients"] = clients
+			newSettings, err := json.Marshal(settings)
+			if err != nil {
+				continue
+			}
+			ib.Settings = string(newSettings)
+			if err := tx.Save(&ib).Error; err != nil {
+				tx.Rollback()
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
+	}
+	return len(records), nil
 }
 
 func buildClientsSummary(all []ClientWithAttachments, onlineSet map[string]struct{}, nowMs, expireDiffMs, trafficDiffBytes int64) ClientsSummary {
@@ -1089,6 +1661,7 @@ func toClientSlim(c ClientWithAttachments) ClientSlim {
 		ExpiryTime: c.ExpiryTime,
 		LimitIP:    c.LimitIP,
 		Reset:      c.Reset,
+		Group:      c.Group,
 		Comment:    c.Comment,
 		InboundIds: c.InboundIds,
 		Traffic:    c.Traffic,
@@ -1254,6 +1827,26 @@ func clientMatchesHasComment(c ClientWithAttachments, mode string) bool {
 	return true
 }
 
+func clientMatchesAnyGroup(c ClientWithAttachments, csv string) bool {
+	groups := parseCSVStrings(csv)
+	if len(groups) == 0 {
+		return true
+	}
+	current := strings.TrimSpace(c.Group)
+	for _, g := range groups {
+		if g == "" {
+			if current == "" {
+				return true
+			}
+			continue
+		}
+		if strings.EqualFold(g, current) {
+			return true
+		}
+	}
+	return false
+}
+
 func clientMatchesBucket(c ClientWithAttachments, bucket string, onlineSet map[string]struct{}, nowMs, expireDiffMs, trafficDiffBytes int64) bool {
 	if bucket == "" {
 		return true
@@ -1343,6 +1936,29 @@ func sortClients(rows []ClientWithAttachments, sortKey, order string) {
 				eb = b.ExpiryTime
 			}
 			return ea < eb
+		case "createdAt":
+			if a.CreatedAt == b.CreatedAt {
+				return a.Id < b.Id
+			}
+			return a.CreatedAt < b.CreatedAt
+		case "updatedAt":
+			if a.UpdatedAt == b.UpdatedAt {
+				return a.Id < b.Id
+			}
+			return a.UpdatedAt < b.UpdatedAt
+		case "lastOnline":
+			la := int64(0)
+			if a.Traffic != nil {
+				la = a.Traffic.LastOnline
+			}
+			lb := int64(0)
+			if b.Traffic != nil {
+				lb = b.Traffic.LastOnline
+			}
+			if la == lb {
+				return a.Id < b.Id
+			}
+			return la < lb
 		}
 		return false
 	}
@@ -1781,7 +2397,7 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 
 	needRestart := false
 	for inboundId, ibEmails := range emailsByInbound {
-		ibResult := s.bulkDelInboundClients(inboundSvc, inboundId, ibEmails, recordsByEmail)
+		ibResult := s.bulkDelInboundClients(inboundSvc, inboundId, ibEmails, recordsByEmail, false)
 		if ibResult.needRestart {
 			needRestart = true
 		}
@@ -1841,6 +2457,7 @@ func (s *ClientService) bulkDelInboundClients(
 	inboundId int,
 	emails []string,
 	records map[string]*model.ClientRecord,
+	keepTraffic bool,
 ) bulkInboundDeleteResult {
 	res := bulkInboundDeleteResult{perEmailSkipped: map[string]string{}}
 
@@ -1962,7 +2579,7 @@ func (s *ClientService) bulkDelInboundClients(
 			delete(foundEmails, email)
 			continue
 		}
-		if shared {
+		if shared || keepTraffic {
 			continue
 		}
 		if delErr := inboundSvc.DelClientIPs(db, email); delErr != nil {
@@ -2195,7 +2812,7 @@ func (s *ClientService) Detach(inboundSvc *InboundService, id int, inboundIds []
 		if key == "" {
 			continue
 		}
-		nr, delErr := s.DelInboundClient(inboundSvc, ibId, key)
+		nr, delErr := s.DelInboundClient(inboundSvc, ibId, key, true)
 		if delErr != nil {
 			return needRestart, delErr
 		}
@@ -2255,6 +2872,10 @@ func (s *ClientService) AddInboundClient(inboundSvc *InboundService, data *model
 				cm["created_at"] = nowTs
 			}
 			cm["updated_at"] = nowTs
+			existingSub, _ := cm["subId"].(string)
+			if strings.TrimSpace(existingSub) == "" {
+				cm["subId"] = random.NumLower(16)
+			}
 			interfaceClients[i] = cm
 		}
 	}
@@ -2493,11 +3114,13 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	}
 	settingsClients := oldSettings["clients"].([]any)
 	var preservedCreated any
+	var preservedSubID string
 	if clientIndex >= 0 && clientIndex < len(settingsClients) {
 		if oldMap, ok := settingsClients[clientIndex].(map[string]any); ok {
 			if v, ok2 := oldMap["created_at"]; ok2 {
 				preservedCreated = v
 			}
+			preservedSubID, _ = oldMap["subId"].(string)
 		}
 	}
 	if len(interfaceClients) > 0 {
@@ -2507,6 +3130,14 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 			}
 			newMap["created_at"] = preservedCreated
 			newMap["updated_at"] = time.Now().Unix() * 1000
+			newSub, _ := newMap["subId"].(string)
+			if strings.TrimSpace(newSub) == "" {
+				if strings.TrimSpace(preservedSubID) != "" {
+					newMap["subId"] = preservedSubID
+				} else {
+					newMap["subId"] = random.NumLower(16)
+				}
+			}
 			interfaceClients[0] = newMap
 		}
 	}
@@ -2670,7 +3301,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	return needRestart, nil
 }
 
-func (s *ClientService) DelInboundClient(inboundSvc *InboundService, inboundId int, clientId string) (bool, error) {
+func (s *ClientService) DelInboundClient(inboundSvc *InboundService, inboundId int, clientId string, keepTraffic bool) (bool, error) {
 	defer lockInbound(inboundId).Unlock()
 
 	oldInbound, err := inboundSvc.GetInbound(inboundId)
@@ -2733,7 +3364,7 @@ func (s *ClientService) DelInboundClient(inboundSvc *InboundService, inboundId i
 		return false, err
 	}
 
-	if !emailShared {
+	if !emailShared && !keepTraffic {
 		err = inboundSvc.DelClientIPs(db, email)
 		if err != nil {
 			logger.Error("Error in delete client IPs")
@@ -2750,7 +3381,7 @@ func (s *ClientService) DelInboundClient(inboundSvc *InboundService, inboundId i
 			return false, err
 		}
 		notDepleted := len(enables) > 0 && enables[0]
-		if !emailShared {
+		if !emailShared && !keepTraffic {
 			err = inboundSvc.DelClientStat(db, email)
 			if err != nil {
 				logger.Error("Delete stats Data Error")
@@ -2797,7 +3428,7 @@ func (s *ClientService) DelInboundClient(inboundSvc *InboundService, inboundId i
 	return needRestart, nil
 }
 
-func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string) (bool, error) {
+func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string, keepTraffic bool) (bool, error) {
 	defer lockInbound(inboundId).Unlock()
 
 	oldInbound, err := inboundSvc.GetInbound(inboundId)
@@ -2854,7 +3485,7 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 		return false, err
 	}
 
-	if !emailShared {
+	if !emailShared && !keepTraffic {
 		if err := inboundSvc.DelClientIPs(db, email); err != nil {
 			logger.Error("Error in delete client IPs")
 			return false, err
@@ -2864,14 +3495,16 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	needRestart := false
 
 	if len(email) > 0 && !emailShared {
-		traffic, err := inboundSvc.GetClientTrafficByEmail(email)
-		if err != nil {
-			return false, err
-		}
-		if traffic != nil {
-			if err := inboundSvc.DelClientStat(db, email); err != nil {
-				logger.Error("Delete stats Data Error")
+		if !keepTraffic {
+			traffic, err := inboundSvc.GetClientTrafficByEmail(email)
+			if err != nil {
 				return false, err
+			}
+			if traffic != nil {
+				if err := inboundSvc.DelClientStat(db, email); err != nil {
+					logger.Error("Delete stats Data Error")
+					return false, err
+				}
 			}
 		}
 

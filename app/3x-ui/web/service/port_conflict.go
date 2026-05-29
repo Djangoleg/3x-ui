@@ -10,9 +10,6 @@ import (
 	"github.com/mhsanaei/3x-ui/v3/util/common"
 )
 
-// transportBits is a bitmask of L4 transports an inbound listens on.
-// 0.0.0.0:443/tcp and 0.0.0.0:443/udp are independent sockets in linux,
-// so the conflict check needs more than just the port number.
 type transportBits uint8
 
 const (
@@ -20,19 +17,6 @@ const (
 	transportUDP
 )
 
-// inboundTransports returns the L4 transports the given inbound listens on.
-// always returns at least one bit (falls back to tcp on parse errors), so
-// no parse failure can silently let a real socket collision through.
-//
-// the rules:
-//   - hysteria, wireguard: udp regardless of streamSettings
-//   - streamSettings.network=kcp or quic: udp (both ride on udp at L4)
-//   - shadowsocks: settings.network ("tcp" / "udp" / "tcp,udp"), overrides
-//     the streamSettings-derived bit when present
-//   - tunnel (xray dokodemo-door): same shape via settings.allowedNetwork
-//     (3x-ui's wrapper renames the field)
-//   - mixed (socks/http combo): tcp + udp when settings.udp is true
-//   - everything else: tcp
 func inboundTransports(protocol model.Protocol, streamSettings, settings string) transportBits {
 	// protocols that ignore streamSettings entirely.
 	switch protocol {
@@ -69,11 +53,6 @@ func inboundTransports(protocol model.Protocol, streamSettings, settings string)
 		if json.Unmarshal([]byte(settings), &st) == nil {
 			switch protocol {
 			case model.Shadowsocks, model.Tunnel:
-				// shadowsocks exposes settings.network, tunnel exposes
-				// settings.allowedNetwork (3x-ui's wrapper around xray's
-				// dokodemo-door). both carry "tcp" / "udp" / "tcp,udp"
-				// and, when present, win outright over the streamSettings-
-				// derived default; absent/empty keeps the inferred bit (tcp).
 				key := "network"
 				if protocol == model.Tunnel {
 					key = "allowedNetwork"
@@ -106,10 +85,6 @@ func inboundTransports(protocol model.Protocol, streamSettings, settings string)
 	return bits
 }
 
-// listenOverlaps reports whether two listen addresses can collide on the
-// same port. preserves the rule from the original checkPortExist:
-// any-address (empty / 0.0.0.0 / :: / ::0) overlaps with everything,
-// otherwise only identical specific addresses overlap.
 func listenOverlaps(a, b string) bool {
 	if isAnyListen(a) || isAnyListen(b) {
 		return true
@@ -121,12 +96,6 @@ func isAnyListen(s string) bool {
 	return s == "" || s == "0.0.0.0" || s == "::" || s == "::0"
 }
 
-// portConflictDetail describes the existing inbound that an add/update
-// would collide with. it carries enough context for the API layer to
-// render a user-actionable error ("port 443 (tcp) already used by
-// inbound 'my-vless' (#7) on *") instead of the historical opaque
-// "Port exists". Transports holds only the bits the two inbounds
-// actually share, not the existing inbound's full transport mask.
 type portConflictDetail struct {
 	InboundID  int
 	Remark     string
@@ -155,22 +124,6 @@ func (d *portConflictDetail) String() string {
 		d.Port, transportTagSuffix(d.Transports), name, listen)
 }
 
-// checkPortConflict reports the existing inbound (if any) that adding
-// or updating an inbound on (listen, port) would clash with. nil result
-// means no conflict.
-//
-// the check understands that tcp/443 and udp/443 are independent
-// sockets in linux and may coexist on the same address (see
-// inboundTransports for the per-protocol L4 mapping).
-//
-// node scope: inbounds with different NodeID run on different physical
-// machines (local panel xray vs a remote node, or two remote nodes),
-// so their sockets can't collide. only candidates with the same NodeID
-// participate in the listen/transport overlap check.
-//
-// listen overlap: a specific listen address conflicts with any-address
-// on the same port (both directions), otherwise only identical specific
-// addresses overlap.
 func (s *InboundService) checkPortConflict(inbound *model.Inbound, ignoreId int) (*portConflictDetail, error) {
 	db := database.GetDB()
 
@@ -208,11 +161,6 @@ func (s *InboundService) checkPortConflict(inbound *model.Inbound, ignoreId int)
 	return nil, nil
 }
 
-// sameNode reports whether two NodeID pointers refer to the same xray
-// process. nil/nil means both inbounds run on the local panel; non-nil
-// with equal value means they share the same remote node. any mix
-// (local vs remote, remote-A vs remote-B) is "different node" and
-// can't produce a real socket collision.
 func sameNode(a, b *int) bool {
 	if a == nil && b == nil {
 		return true
@@ -223,20 +171,13 @@ func sameNode(a, b *int) bool {
 	return *a == *b
 }
 
-// baseInboundTag is the historical "inbound-<port>" / "inbound-<listen>:<port>"
-// shape. kept exactly so existing routing rules that reference these tags
-// keep working after the upgrade.
 func baseInboundTag(listen string, port int) string {
 	if isAnyListen(listen) {
-		return fmt.Sprintf("inbound-%v", port)
+		return fmt.Sprintf("in-%v", port)
 	}
-	return fmt.Sprintf("inbound-%v:%v", listen, port)
+	return fmt.Sprintf("in-%v:%v", listen, port)
 }
 
-// transportTagSuffix turns a transport mask into a short, stable string.
-// used both for generateInboundTag's disambiguation ("inbound-443-udp"
-// when the base "inbound-443" is taken on a coexisting transport) and
-// for the L4 hint in portConflictDetail's user-facing error message.
 func transportTagSuffix(b transportBits) string {
 	switch b {
 	case transportTCP:
@@ -244,34 +185,29 @@ func transportTagSuffix(b transportBits) string {
 	case transportUDP:
 		return "udp"
 	case transportTCP | transportUDP:
-		return "mixed"
+		return "tcpudp"
 	}
 	return "any"
 }
 
-// generateInboundTag picks a tag for the inbound that doesn't collide with
-// any existing row. for the common single-inbound-per-port case the tag
-// stays exactly as before ("inbound-443"), so user routing rules don't
-// silently change shape on upgrade. only when a same-port neighbour
-// already owns the base tag (now possible because tcp/443 and udp/443 can
-// coexist after the transport-aware port check) does this append a
-// transport suffix like "inbound-443-udp".
-//
-// ignoreId is the inbound's own id during update so it doesn't see itself
-// as a collision; pass 0 on add.
-func (s *InboundService) generateInboundTag(inbound *model.Inbound, ignoreId int) (string, error) {
-	base := baseInboundTag(inbound.Listen, inbound.Port)
-	exists, err := s.tagExists(base, ignoreId)
-	if err != nil {
-		return "", err
+// nodeTagPrefix scopes a tag to one remote node so the same listen+port
+// can live on the central panel and on a node without bumping the global
+// UNIQUE(inbounds.tag) constraint. nil → "" (local panel).
+func nodeTagPrefix(nodeID *int) string {
+	if nodeID == nil {
+		return ""
 	}
-	if !exists {
-		return base, nil
-	}
+	return fmt.Sprintf("n%d-", *nodeID)
+}
 
-	suffix := transportTagSuffix(inboundTransports(inbound.Protocol, inbound.StreamSettings, inbound.Settings))
-	candidate := base + "-" + suffix
-	exists, err = s.tagExists(candidate, ignoreId)
+func composeInboundTag(listen string, port int, nodeID *int, bits transportBits) string {
+	return nodeTagPrefix(nodeID) + baseInboundTag(listen, port) + "-" + transportTagSuffix(bits)
+}
+
+func (s *InboundService) generateInboundTag(inbound *model.Inbound, ignoreId int) (string, error) {
+	bits := inboundTransports(inbound.Protocol, inbound.StreamSettings, inbound.Settings)
+	candidate := composeInboundTag(inbound.Listen, inbound.Port, inbound.NodeID, bits)
+	exists, err := s.tagExists(candidate, ignoreId)
 	if err != nil {
 		return "", err
 	}
@@ -279,9 +215,6 @@ func (s *InboundService) generateInboundTag(inbound *model.Inbound, ignoreId int
 		return candidate, nil
 	}
 
-	// the transport-aware port check should have already blocked this
-	// path, but guard anyway so a unique-constraint failure doesn't reach
-	// the user as an opaque sqlite error.
 	for i := 2; i < 100; i++ {
 		c := fmt.Sprintf("%s-%d", candidate, i)
 		exists, err = s.tagExists(c, ignoreId)
@@ -295,19 +228,6 @@ func (s *InboundService) generateInboundTag(inbound *model.Inbound, ignoreId int
 	return "", common.NewError("could not pick a unique inbound tag for port:", inbound.Port)
 }
 
-// resolveInboundTag chooses a tag for an Add or Update. when the caller
-// supplied a non-empty Tag (e.g. the central panel pushed its picked
-// tag to a node during a multi-node sync) and that tag is free in the
-// local DB, it's used verbatim so the two panels stay in agreement —
-// otherwise the node would regenerate (often back to bare
-// "inbound-<port>") and the eventual traffic sync-back would try to
-// INSERT a row whose tag already exists, hitting the UNIQUE constraint
-// on inbounds.tag and rolling the node-side row right back out.
-// when Tag is empty (the common UI path) or collides, fall back to the
-// transport-aware generateInboundTag.
-//
-// ignoreId mirrors generateInboundTag: pass 0 on add, the inbound's
-// own id on update so a row doesn't see its own current tag as taken.
 func (s *InboundService) resolveInboundTag(inbound *model.Inbound, ignoreId int) (string, error) {
 	if inbound.Tag != "" {
 		taken, err := s.tagExists(inbound.Tag, ignoreId)

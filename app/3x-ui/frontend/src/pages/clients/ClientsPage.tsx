@@ -14,6 +14,7 @@ import {
   Pagination,
   Popover,
   Row,
+  Select,
   Space,
   Spin,
   Statistic,
@@ -30,15 +31,18 @@ import {
   EditOutlined,
   FilterOutlined,
   InfoCircleOutlined,
+  LinkOutlined,
   MoreOutlined,
   PlusOutlined,
   QrcodeOutlined,
   RestOutlined,
   RetweetOutlined,
   SearchOutlined,
+  SortAscendingOutlined,
+  TagsOutlined,
   TeamOutlined,
-  UserOutlined,
   UsergroupAddOutlined,
+  UsergroupDeleteOutlined,
 } from '@ant-design/icons';
 
 import { useTheme } from '@/hooks/useTheme';
@@ -57,11 +61,54 @@ const ClientQrModal = lazy(() => import('./ClientQrModal'));
 const ClientBulkAddModal = lazy(() => import('./ClientBulkAddModal'));
 const ClientBulkAdjustModal = lazy(() => import('./ClientBulkAdjustModal'));
 const FilterDrawer = lazy(() => import('./FilterDrawer'));
+const SubLinksModal = lazy(() => import('./SubLinksModal'));
+const BulkAddToGroupModal = lazy(() => import('./BulkAddToGroupModal'));
+const BulkAttachInboundsModal = lazy(() => import('./BulkAttachInboundsModal'));
+const BulkDetachInboundsModal = lazy(() => import('./BulkDetachInboundsModal'));
 import { emptyFilters, activeFilterCount } from './filters';
 import type { ClientFilters } from './filters';
 import './ClientsPage.css';
 
 const FILTER_STATE_KEY = 'clientsFilterState';
+
+function UngroupIcon() {
+  return (
+    <span
+      style={{
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '1em',
+        height: '1em',
+      }}
+    >
+      <TagsOutlined />
+      <span
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+        }}
+      >
+        <span
+          style={{
+            display: 'block',
+            width: '125%',
+            height: '1.5px',
+            background: 'currentColor',
+            transform: 'rotate(-45deg)',
+            borderRadius: '1px',
+          }}
+        />
+      </span>
+    </span>
+  );
+}
 
 type Bucket = 'active' | 'deactive' | 'depleted' | 'expiring';
 
@@ -96,6 +143,7 @@ function readFilterState(): PersistedFilterState {
         buckets: Array.isArray(fromRaw.buckets) ? fromRaw.buckets : [],
         protocols: Array.isArray(fromRaw.protocols) ? fromRaw.protocols : [],
         inboundIds: Array.isArray(fromRaw.inboundIds) ? fromRaw.inboundIds : [],
+        groups: Array.isArray(fromRaw.groups) ? fromRaw.groups : [],
       },
     };
   } catch {
@@ -106,6 +154,25 @@ function readFilterState(): PersistedFilterState {
 function gbToBytes(gb: number | undefined): number {
   if (!gb || gb <= 0) return 0;
   return Math.round(gb * 1024 * 1024 * 1024);
+}
+
+const SORT_OPTIONS: { value: string; column: string; order: 'ascend' | 'descend'; labelKey: string }[] = [
+  { value: 'createdAt:ascend',    column: 'createdAt',  order: 'ascend',   labelKey: 'pages.clients.sortOldest' },
+  { value: 'createdAt:descend',   column: 'createdAt',  order: 'descend',  labelKey: 'pages.clients.sortNewest' },
+  { value: 'updatedAt:descend',   column: 'updatedAt',  order: 'descend',  labelKey: 'pages.clients.sortRecentlyUpdated' },
+  { value: 'lastOnline:descend',  column: 'lastOnline', order: 'descend',  labelKey: 'pages.clients.sortRecentlyOnline' },
+  { value: 'email:ascend',        column: 'email',      order: 'ascend',   labelKey: 'pages.clients.sortEmailAZ' },
+  { value: 'email:descend',       column: 'email',      order: 'descend',  labelKey: 'pages.clients.sortEmailZA' },
+  { value: 'traffic:descend',     column: 'traffic',    order: 'descend',  labelKey: 'pages.clients.sortMostTraffic' },
+  { value: 'remaining:descend',   column: 'remaining',  order: 'descend',  labelKey: 'pages.clients.sortHighestRemaining' },
+  { value: 'expiryTime:ascend',   column: 'expiryTime', order: 'ascend',   labelKey: 'pages.clients.sortExpiringSoonest' },
+];
+
+const DEFAULT_SORT = SORT_OPTIONS[0];
+
+function sortValueFor(column: string | null, order: 'ascend' | 'descend' | null): string {
+  if (!column || !order) return DEFAULT_SORT.value;
+  return `${column}:${order}`;
 }
 
 export default function ClientsPage() {
@@ -120,10 +187,11 @@ export default function ClientsPage() {
   const {
     clients, filtered,
     summary: serverSummary,
+    allGroups,
     setQuery,
     inbounds, onlines, loading, fetched, subSettings,
     ipLimitEnable, tgBotEnable, expireDiff, trafficDiff, pageSize,
-    create, update, remove, bulkDelete, bulkAdjust, attach, detach,
+    create, update, remove, bulkDelete, bulkAdjust, bulkAddToGroup, bulkRemoveFromGroup, attach, bulkAttach, detach, bulkDetach,
     resetTraffic, resetAllTraffics, delDepleted, setEnable,
     applyTrafficEvent, applyClientStatsEvent,
     hydrate,
@@ -145,6 +213,10 @@ export default function ClientsPage() {
   const [qrClient, setQrClient] = useState<ClientRecord | null>(null);
   const [bulkAddOpen, setBulkAddOpen] = useState(false);
   const [bulkAdjustOpen, setBulkAdjustOpen] = useState(false);
+  const [subLinksOpen, setSubLinksOpen] = useState(false);
+  const [bulkGroupOpen, setBulkGroupOpen] = useState(false);
+  const [bulkAttachOpen, setBulkAttachOpen] = useState(false);
+  const [bulkDetachOpen, setBulkDetachOpen] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
 
   const initial = readFilterState();
@@ -152,8 +224,8 @@ export default function ClientsPage() {
   const [filters, setFilters] = useState<ClientFilters>(initial.filters);
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
 
-  const [sortColumn, setSortColumn] = useState<string | null>(null);
-  const [sortOrder, setSortOrder] = useState<'ascend' | 'descend' | null>(null);
+  const [sortColumn, setSortColumn] = useState<string | null>(DEFAULT_SORT.column);
+  const [sortOrder, setSortOrder] = useState<'ascend' | 'descend' | null>(DEFAULT_SORT.order);
   const [currentPage, setCurrentPage] = useState(1);
   const [tablePageSize, setTablePageSize] = useState(25);
   // debouncedSearch lags behind the input so we don't spam the server on every
@@ -190,6 +262,7 @@ export default function ClientsPage() {
       autoRenew: filters.autoRenew || undefined,
       hasTgId: filters.hasTgId || undefined,
       hasComment: filters.hasComment || undefined,
+      group: filters.groups.join(',') || undefined,
       sort: sortColumn || undefined,
       order: sortOrder || undefined,
     });
@@ -216,12 +289,17 @@ export default function ClientsPage() {
     return [...values].sort();
   }, [inbounds]);
 
+  const groupOptions = useMemo(() => {
+    const values = new Set<string>(allGroups);
+    for (const g of filters.groups) values.add(g);
+    return [...values].sort((a, b) => a.localeCompare(b));
+  }, [allGroups, filters.groups]);
+
   const isOnline = useCallback((email: string) => !!email && onlineSet.has(email), [onlineSet]);
 
   function inboundLabel(id: number) {
     const ib = inboundsById[id];
-    if (!ib) return `#${id}`;
-    return ib.remark ? `${ib.remark} (${ib.protocol}:${ib.port})` : `${ib.protocol}:${ib.port}`;
+    return ib?.tag ?? '';
   }
 
   const clientBucket = useCallback((row: ClientRecord | null | undefined): Bucket | null => {
@@ -421,6 +499,26 @@ export default function ClientsPage() {
     });
   }
 
+  function onBulkUngroup() {
+    const emails = [...selectedRowKeys];
+    if (emails.length === 0) return;
+    modal.confirm({
+      title: t('pages.clients.ungroupConfirmTitle', { count: emails.length }),
+      content: t('pages.clients.ungroupConfirmContent'),
+      okText: t('confirm'),
+      okType: 'danger',
+      cancelText: t('cancel'),
+      onOk: async () => {
+        const msg = await bulkRemoveFromGroup(emails);
+        if (msg?.success) {
+          setSelectedRowKeys([]);
+          const affected = (msg.obj as { affected?: number } | undefined)?.affected ?? emails.length;
+          messageApi.success(t('pages.clients.ungroupSuccessToast', { count: affected }));
+        }
+      },
+    });
+  }
+
   function onBulkDelete() {
     const emails = [...selectedRowKeys];
     if (emails.length === 0) return;
@@ -475,151 +573,163 @@ export default function ClientsPage() {
     return classes.join(' ');
   }, [isDark, isUltra]);
 
-  const onTableChange: NonNullable<TableProps<ClientRecord>['onChange']> = (pag, _filters, sorter) => {
+  const onTableChange: NonNullable<TableProps<ClientRecord>['onChange']> = (pag) => {
     if (pag?.current) setCurrentPage(pag.current);
     if (pag?.pageSize) setTablePageSize(pag.pageSize);
-    const s = Array.isArray(sorter) ? sorter[0] : sorter;
-    setSortColumn((s?.columnKey as string) || (s?.field as string) || null);
-    setSortOrder((s?.order as 'ascend' | 'descend' | null) || null);
   };
 
-  const columns = useMemo<ColumnsType<ClientRecord>>(() => {
-    function sortableCol<T extends ColumnsType<ClientRecord>[number]>(col: T, key: string): T {
-      return {
-        ...col,
-        sorter: true,
-        showSorterTooltip: false,
-        sortOrder: sortColumn === key ? sortOrder : null,
-        sortDirections: ['ascend', 'descend'],
-      };
-    }
-    return [
-      {
-        title: t('pages.clients.actions'),
-        key: 'actions',
-        width: 200,
-        render: (_v, record) => (
-          <Space size={4}>
-            <Tooltip title={t('pages.clients.qrCode')}>
-              <Button size="small" type="text" icon={<QrcodeOutlined />} onClick={() => onShowQr(record)} />
-            </Tooltip>
-            <Tooltip title={t('pages.clients.moreInformation')}>
-              <Button size="small" type="text" icon={<InfoCircleOutlined />} onClick={() => onShowInfo(record)} />
-            </Tooltip>
-            <Tooltip title={t('pages.inbounds.resetTraffic')}>
-              <Button size="small" type="text" icon={<RetweetOutlined />} onClick={() => onResetTraffic(record)} />
-            </Tooltip>
-            <Tooltip title={t('edit')}>
-              <Button size="small" type="text" icon={<EditOutlined />} onClick={() => onEdit(record)} />
-            </Tooltip>
-            <Tooltip title={t('delete')}>
-              <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => onDelete(record)} />
-            </Tooltip>
-          </Space>
-        ),
-      },
-      sortableCol({
-        title: t('pages.clients.enabled'), key: 'enable', width: 80,
-        render: (_v, record) => (
-          <Switch
-            checked={!!record.enable}
-            size="small"
-            loading={togglingEmail === record.email}
-            onChange={(next) => onToggleEnable(record, next)}
-          />
-        ),
-      }, 'enable'),
-      {
-        title: t('pages.clients.online'),
-        key: 'online',
-        width: 90,
-        render: (_v, record) => {
-          const bucket = clientBucket(record);
-          if (bucket === 'depleted') return <Tag color="red">{t('depleted')}</Tag>;
-          if (record.enable && isOnline(record.email)) return <Tag color="green">{t('pages.clients.online')}</Tag>;
-          if (!record.enable) return <Tag>{t('disabled')}</Tag>;
-          if (bucket === 'expiring') return <Tag color="orange">{t('depletingSoon')}</Tag>;
-          return <Tag>{t('pages.clients.offline')}</Tag>;
-        },
-      },
-      sortableCol({
-        title: t('pages.clients.client'),
-        key: 'email',
-        render: (_v, record) => (
-          <div className="email-cell">
-            <span className="email">{record.email}</span>
-            {record.subId && <span className="sub" title={record.subId}>{record.subId}</span>}
-            {record.comment && <span className="sub" title={record.comment}>{record.comment}</span>}
-          </div>
-        ),
-      }, 'email'),
-      sortableCol({
-        title: t('pages.clients.attachedInbounds'),
-        key: 'inboundIds',
-        width: 170,
-        render: (_v, record) => {
-          const ids = record.inboundIds || [];
-          if (ids.length === 0) return <span style={{ color: 'rgba(0,0,0,0.45)' }}>—</span>;
-          const visible = ids.slice(0, INBOUND_CHIP_LIMIT);
-          const overflow = ids.slice(INBOUND_CHIP_LIMIT);
-          const chip = (id: number, compact: boolean) => {
-            const ib = inboundsById[id];
-            const proto = (ib?.protocol || '').toLowerCase();
-            const color = INBOUND_PROTOCOL_COLORS[proto] ?? 'default';
-            const compactLabel = ib ? `${ib.protocol}:${ib.port}` : `#${id}`;
-            return (
-              <Tooltip key={id} title={inboundLabel(id)}>
-                <Tag color={color} style={{ margin: 2 }}>
-                  {compact ? compactLabel : inboundLabel(id)}
-                </Tag>
-              </Tooltip>
-            );
-          };
-          return (
-            <>
-              {visible.map((id) => chip(id, true))}
-              {overflow.length > 0 && (
-                <Popover
-                  trigger="click"
-                  placement="bottomRight"
-                  content={
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 280, maxHeight: 280, overflowY: 'auto' }}>
-                      {overflow.map((id) => chip(id, false))}
-                    </div>
-                  }
-                >
-                  <Tag color="default" style={{ margin: 2, cursor: 'pointer' }}>
-                    +{overflow.length}
-                  </Tag>
-                </Popover>
-              )}
-            </>
-          );
-        },
-      }, 'inboundIds'),
-      sortableCol({
-        title: t('pages.clients.traffic'),
-        key: 'traffic',
-        render: (_v, record) => trafficLabel(record),
-      }, 'traffic'),
-      sortableCol({
-        title: t('pages.clients.remaining'),
-        key: 'remaining',
-        width: 130,
-        render: (_v, record) => <Tag color={remainingColor(record)}>{remainingLabel(record)}</Tag>,
-      }, 'remaining'),
-      sortableCol({
-        title: t('pages.clients.duration'),
-        key: 'expiryTime',
-        render: (_v, record) => (
-          <Tooltip title={expiryLabel(record)}>
-            <Tag color={expiryColor(record)}>{record.expiryTime ? expiryRelative(record) : '∞'}</Tag>
+  const columns = useMemo<ColumnsType<ClientRecord>>(() => [
+    {
+      title: t('pages.clients.actions'),
+      key: 'actions',
+      width: 200,
+      render: (_v, record) => (
+        <Space size={4}>
+          <Tooltip title={t('pages.clients.qrCode')}>
+            <Button size="small" type="text" icon={<QrcodeOutlined />} onClick={() => onShowQr(record)} />
           </Tooltip>
-        ),
-      }, 'expiryTime'),
-    ];
+          <Tooltip title={t('pages.clients.clientInfo')}>
+            <Button size="small" type="text" icon={<InfoCircleOutlined />} onClick={() => onShowInfo(record)} />
+          </Tooltip>
+          <Tooltip title={t('pages.inbounds.resetTraffic')}>
+            <Button size="small" type="text" icon={<RetweetOutlined />} onClick={() => onResetTraffic(record)} />
+          </Tooltip>
+          <Tooltip title={t('edit')}>
+            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => onEdit(record)} />
+          </Tooltip>
+          <Tooltip title={t('delete')}>
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => onDelete(record)} />
+          </Tooltip>
+        </Space>
+      ),
+    },
+    {
+      title: t('pages.clients.enabled'),
+      key: 'enable',
+      width: 80,
+      render: (_v, record) => (
+        <Switch
+          checked={!!record.enable}
+          size="small"
+          loading={togglingEmail === record.email}
+          onChange={(next) => onToggleEnable(record, next)}
+        />
+      ),
+    },
+    {
+      title: t('pages.clients.online'),
+      key: 'online',
+      width: 90,
+      render: (_v, record) => {
+        const bucket = clientBucket(record);
+        if (bucket === 'depleted') return <Tag color="red">{t('depleted')}</Tag>;
+        if (record.enable && isOnline(record.email)) return <Tag color="green">{t('pages.clients.online')}</Tag>;
+        if (!record.enable) return <Tag>{t('disabled')}</Tag>;
+        if (bucket === 'expiring') return <Tag color="orange">{t('depletingSoon')}</Tag>;
+        return <Tag>{t('pages.clients.offline')}</Tag>;
+      },
+    },
+    {
+      title: t('pages.clients.client'),
+      key: 'email',
+      render: (_v, record) => (
+        <div className="email-cell">
+          <span className="email">{record.email}</span>
+          {record.subId && <span className="sub" title={record.subId}>{record.subId}</span>}
+          {record.comment && <span className="sub" title={record.comment}>{record.comment}</span>}
+        </div>
+      ),
+    },
+    {
+      title: t('pages.clients.group'),
+      key: 'group',
+      width: 130,
+      hidden: allGroups.length === 0,
+      render: (_v, record) => {
+        if (!record.group) return <span style={{ color: 'rgba(0,0,0,0.45)' }}>—</span>;
+        const isActive = filters.groups.includes(record.group);
+        return (
+          <Tag
+            color="geekblue"
+            style={{ margin: 0, cursor: 'pointer', opacity: isActive ? 0.6 : 1 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!isActive) {
+                setFilters({ ...filters, groups: [...filters.groups, record.group!] });
+              }
+            }}
+          >
+            {record.group}
+          </Tag>
+        );
+      },
+    },
+    {
+      title: t('pages.clients.attachedInbounds'),
+      key: 'inboundIds',
+      width: 170,
+      render: (_v, record) => {
+        const ids = record.inboundIds || [];
+        if (ids.length === 0) return <span style={{ color: 'rgba(0,0,0,0.45)' }}>—</span>;
+        const visible = ids.slice(0, INBOUND_CHIP_LIMIT);
+        const overflow = ids.slice(INBOUND_CHIP_LIMIT);
+        const chip = (id: number, compact: boolean) => {
+          const ib = inboundsById[id];
+          const proto = (ib?.protocol || '').toLowerCase();
+          const color = INBOUND_PROTOCOL_COLORS[proto] ?? 'default';
+          const compactLabel = ib?.tag ?? '';
+          return (
+            <Tooltip key={id} title={inboundLabel(id)}>
+              <Tag color={color} style={{ margin: 2 }}>
+                {compact ? compactLabel : inboundLabel(id)}
+              </Tag>
+            </Tooltip>
+          );
+        };
+        return (
+          <>
+            {visible.map((id) => chip(id, true))}
+            {overflow.length > 0 && (
+              <Popover
+                trigger="click"
+                placement="bottomRight"
+                content={
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 280, maxHeight: 280, overflowY: 'auto' }}>
+                    {overflow.map((id) => chip(id, false))}
+                  </div>
+                }
+              >
+                <Tag color="default" style={{ margin: 2, cursor: 'pointer' }}>
+                  +{overflow.length}
+                </Tag>
+              </Popover>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      title: t('pages.clients.traffic'),
+      key: 'traffic',
+      render: (_v, record) => trafficLabel(record),
+    },
+    {
+      title: t('pages.clients.remaining'),
+      key: 'remaining',
+      width: 130,
+      render: (_v, record) => <Tag color={remainingColor(record)}>{remainingLabel(record)}</Tag>,
+    },
+    {
+      title: t('pages.clients.duration'),
+      key: 'expiryTime',
+      render: (_v, record) => (
+        <Tooltip title={expiryLabel(record)}>
+          <Tag color={expiryColor(record)}>{record.expiryTime ? expiryRelative(record) : '∞'}</Tag>
+        </Tooltip>
+      ),
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, togglingEmail, sortColumn, sortOrder, clientBucket, isOnline, inboundsById]);
+  ], [t, togglingEmail, clientBucket, isOnline, inboundsById, filters, allGroups]);
 
   const tablePagination = {
     current: currentPage,
@@ -732,28 +842,90 @@ export default function ClientsPage() {
                       hoverable
                       title={
                         <div className="card-toolbar">
-                          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={onAdd}>
-                            {!isMobile && t('pages.clients.addClients')}
-                          </Button>
-                          <Button size="small" icon={<UsergroupAddOutlined />} onClick={() => setBulkAddOpen(true)}>
-                            {!isMobile && t('pages.clients.bulk')}
-                          </Button>
-                          {selectedRowKeys.length > 0 && (
+                          {selectedRowKeys.length === 0 ? (
+                            <Button type="primary" icon={<PlusOutlined />} onClick={onAdd}>
+                              {!isMobile && t('pages.clients.addClients')}
+                            </Button>
+                          ) : (
                             <>
-                              <Button size="small" icon={<ClockCircleOutlined />} onClick={() => setBulkAdjustOpen(true)}>
-                                {t('pages.clients.adjustSelected', { count: selectedRowKeys.length })}
+                              <Tag
+                                color="blue"
+                                closable
+                                onClose={() => setSelectedRowKeys([])}
+                                style={{ marginInlineEnd: 0, padding: '4px 8px', fontSize: 13 }}
+                              >
+                                {t('pages.clients.selectedCount', { count: selectedRowKeys.length })}
+                              </Tag>
+                              <Button icon={<UsergroupAddOutlined />} onClick={() => setBulkAttachOpen(true)}>
+                                {!isMobile && t('pages.clients.attach')}
                               </Button>
-                              <Button danger size="small" icon={<DeleteOutlined />} onClick={onBulkDelete}>
-                                {t('pages.clients.deleteSelected', { count: selectedRowKeys.length })}
+                              <Button danger icon={<UsergroupDeleteOutlined />} onClick={() => setBulkDetachOpen(true)}>
+                                {!isMobile && t('pages.clients.detach')}
+                              </Button>
+                              <Button icon={<TagsOutlined />} onClick={() => setBulkGroupOpen(true)}>
+                                {!isMobile && t('pages.clients.addToGroup')}
+                              </Button>
+                              <Button danger icon={<UngroupIcon />} onClick={onBulkUngroup}>
+                                {!isMobile && t('pages.clients.ungroup')}
                               </Button>
                             </>
                           )}
-                          <Button size="small" icon={<RetweetOutlined />} onClick={onResetAllTraffics}>
-                            {!isMobile && t('pages.clients.resetAllTraffics')}
-                          </Button>
-                          <Button size="small" danger icon={<RestOutlined />} onClick={onDelDepleted}>
-                            {!isMobile && t('pages.clients.delDepleted')}
-                          </Button>
+                          <Dropdown
+                            trigger={['click']}
+                            placement="bottomRight"
+                            menu={{
+                              items: selectedRowKeys.length > 0
+                                ? [
+                                    {
+                                      key: 'adjust',
+                                      icon: <ClockCircleOutlined />,
+                                      label: t('pages.clients.adjust'),
+                                      onClick: () => setBulkAdjustOpen(true),
+                                    },
+                                    {
+                                      key: 'subLinks',
+                                      icon: <LinkOutlined />,
+                                      label: t('pages.clients.subLinks'),
+                                      onClick: () => setSubLinksOpen(true),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      key: 'bulk',
+                                      icon: <UsergroupAddOutlined />,
+                                      label: t('pages.clients.bulk'),
+                                      onClick: () => setBulkAddOpen(true),
+                                    },
+                                    {
+                                      key: 'resetAll',
+                                      icon: <RetweetOutlined />,
+                                      label: t('pages.clients.resetAllTraffics'),
+                                      onClick: onResetAllTraffics,
+                                    },
+                                    {
+                                      key: 'delDepleted',
+                                      icon: <RestOutlined />,
+                                      label: t('pages.clients.delDepleted'),
+                                      danger: true,
+                                      onClick: onDelDepleted,
+                                    },
+                                  ],
+                            }}
+                          >
+                            <Button icon={<MoreOutlined />}>
+                              {!isMobile && t('more')}
+                            </Button>
+                          </Dropdown>
+                          {selectedRowKeys.length > 0 && (
+                            <Button
+                              danger
+                              icon={<DeleteOutlined />}
+                              onClick={onBulkDelete}
+                              style={{ marginInlineStart: 'auto' }}
+                            >
+                              {!isMobile && t('delete')}
+                            </Button>
+                          )}
                         </div>
                       }
                     >
@@ -777,6 +949,18 @@ export default function ClientsPage() {
                             {!isMobile && t('filter')}
                           </Button>
                         </Badge>
+                        <Select
+                          value={sortValueFor(sortColumn, sortOrder)}
+                          size={isMobile ? 'small' : 'middle'}
+                          suffixIcon={<SortAscendingOutlined />}
+                          style={{ minWidth: isMobile ? 130 : 200 }}
+                          onChange={(value) => {
+                            const opt = SORT_OPTIONS.find((o) => o.value === value);
+                            setSortColumn(opt?.column ?? null);
+                            setSortOrder(opt?.order ?? null);
+                          }}
+                          options={SORT_OPTIONS.map((o) => ({ value: o.value, label: t(o.labelKey) }))}
+                        />
                         {activeCount > 0 && (
                           <Button
                             size={isMobile ? 'small' : 'middle'}
@@ -816,6 +1000,16 @@ export default function ClientsPage() {
                               onClose={() => setFilters({ ...filters, inboundIds: filters.inboundIds.filter((x) => x !== id) })}
                             >
                               {inboundLabel(id)}
+                            </Tag>
+                          ))}
+                          {filters.groups.map((g) => (
+                            <Tag
+                              key={`g-${g}`}
+                              closable
+                              color="geekblue"
+                              onClose={() => setFilters({ ...filters, groups: filters.groups.filter((x) => x !== g) })}
+                            >
+                              {t('pages.clients.group')}: {g}
                             </Tag>
                           ))}
                           {(filters.expiryFrom || filters.expiryTo) && (
@@ -862,8 +1056,8 @@ export default function ClientsPage() {
                           locale={{
                             emptyText: (
                               <div className="clients-empty">
-                                <UserOutlined style={{ fontSize: 32, marginBottom: 8 }} />
-                                <div>{t('pages.clients.empty')}</div>
+                                <TeamOutlined style={{ fontSize: 32, marginBottom: 8 }} />
+                                <div>{t('noData')}</div>
                               </div>
                             ),
                           }}
@@ -887,8 +1081,8 @@ export default function ClientsPage() {
                             )}
                             {filteredClients.length === 0 && (
                               <div className="card-empty">
-                                <UserOutlined style={{ fontSize: 28, opacity: 0.5 }} />
-                                <div>{t('pages.clients.empty')}</div>
+                                <TeamOutlined style={{ fontSize: 28, opacity: 0.5 }} />
+                                <div>{t('noData')}</div>
                               </div>
                             )}
                             {filteredClients.length > 0 && (
@@ -923,7 +1117,7 @@ export default function ClientsPage() {
                                     {bucket === 'depleted' && <Tag color="red" className="status-tag">{t('depleted')}</Tag>}
                                     {bucket === 'expiring' && <Tag color="orange" className="status-tag">{t('depletingSoon')}</Tag>}
                                     <div className="card-actions" onClick={(e) => e.stopPropagation()}>
-                                      <Tooltip title={t('pages.clients.moreInformation')}>
+                                      <Tooltip title={t('pages.clients.clientInfo')}>
                                         <InfoCircleOutlined className="row-action-trigger" onClick={() => onShowInfo(row)} />
                                       </Tooltip>
                                       <Switch
@@ -988,6 +1182,7 @@ export default function ClientsPage() {
             inbounds={inbounds}
             ipLimitEnable={ipLimitEnable}
             tgBotEnable={tgBotEnable}
+            groups={allGroups}
             save={onSave}
             onOpenChange={setFormOpen}
           />
@@ -1015,6 +1210,7 @@ export default function ClientsPage() {
             open={bulkAddOpen}
             inbounds={inbounds}
             ipLimitEnable={ipLimitEnable}
+            groups={allGroups}
             onOpenChange={setBulkAddOpen}
             onSaved={() => setBulkAddOpen(false)}
           />
@@ -1034,6 +1230,63 @@ export default function ClientsPage() {
             }}
           />
         </LazyMount>
+        <LazyMount when={subLinksOpen}>
+          <SubLinksModal
+            open={subLinksOpen}
+            emails={selectedRowKeys}
+            clients={clients}
+            subSettings={subSettings}
+            onOpenChange={setSubLinksOpen}
+          />
+        </LazyMount>
+        <LazyMount when={bulkGroupOpen}>
+          <BulkAddToGroupModal
+            open={bulkGroupOpen}
+            count={selectedRowKeys.length}
+            groups={allGroups}
+            onOpenChange={setBulkGroupOpen}
+            onSubmit={async (group) => {
+              const msg = await bulkAddToGroup([...selectedRowKeys], group);
+              if (msg?.success) {
+                setSelectedRowKeys([]);
+                return (msg.obj as { affected?: number } | undefined) ?? { affected: 0 };
+              }
+              return null;
+            }}
+          />
+        </LazyMount>
+        <LazyMount when={bulkAttachOpen}>
+          <BulkAttachInboundsModal
+            open={bulkAttachOpen}
+            count={selectedRowKeys.length}
+            inbounds={inbounds}
+            onOpenChange={setBulkAttachOpen}
+            onSubmit={async (inboundIds) => {
+              const msg = await bulkAttach([...selectedRowKeys], inboundIds);
+              if (msg?.success) {
+                setSelectedRowKeys([]);
+                return msg.obj ?? { attached: [], skipped: [], errors: [] };
+              }
+              return null;
+            }}
+          />
+        </LazyMount>
+        <LazyMount when={bulkDetachOpen}>
+          <BulkDetachInboundsModal
+            open={bulkDetachOpen}
+            count={selectedRowKeys.length}
+            inbounds={inbounds}
+            onOpenChange={setBulkDetachOpen}
+            onSubmit={async (inboundIds) => {
+              const msg = await bulkDetach([...selectedRowKeys], inboundIds);
+              if (msg?.success) {
+                setSelectedRowKeys([]);
+                return msg.obj ?? { detached: [], skipped: [], errors: [] };
+              }
+              return null;
+            }}
+          />
+        </LazyMount>
         <LazyMount when={filterDrawerOpen}>
           <FilterDrawer
             open={filterDrawerOpen}
@@ -1042,6 +1295,7 @@ export default function ClientsPage() {
             onChange={setFilters}
             inbounds={inbounds}
             protocols={protocolOptions}
+            groups={groupOptions}
           />
         </LazyMount>
       </Layout>
