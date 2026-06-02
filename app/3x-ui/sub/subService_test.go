@@ -61,6 +61,44 @@ func TestIsRoutableHost(t *testing.T) {
 	}
 }
 
+func TestResolveInboundAddress(t *testing.T) {
+	const reqHost = "sub.example.com"
+
+	// A subscriber reaches the panel through reqHost; the inbound's own
+	// bind Listen IP (loopback, private, or even a public secondary IP) is
+	// a server-side detail and must never become the link's connect host.
+	t.Run("bind listen IP must not leak into the link host", func(t *testing.T) {
+		s := &SubService{address: reqHost}
+		for _, listen := range []string{"127.0.0.1", "10.0.0.5", "192.168.1.10", "1.2.3.4", "0.0.0.0", "::", "::0", ""} {
+			ib := &model.Inbound{Listen: listen}
+			if got := s.resolveInboundAddress(ib); got != reqHost {
+				t.Fatalf("listen %q: address = %q, want %q (subscriber host, not bind IP)", listen, got, reqHost)
+			}
+		}
+	})
+
+	t.Run("node-managed inbound uses the node address", func(t *testing.T) {
+		id := 7
+		s := &SubService{
+			address:   reqHost,
+			nodesByID: map[int]*model.Node{7: {Id: 7, Address: "node7.example.com"}},
+		}
+		ib := &model.Inbound{NodeID: &id, Listen: "1.2.3.4"}
+		if got := s.resolveInboundAddress(ib); got != "node7.example.com" {
+			t.Fatalf("node-managed address = %q, want node7.example.com", got)
+		}
+	})
+
+	t.Run("node id with no known node falls back to subscriber host", func(t *testing.T) {
+		id := 9
+		s := &SubService{address: reqHost, nodesByID: map[int]*model.Node{}}
+		ib := &model.Inbound{NodeID: &id, Listen: "10.0.0.1"}
+		if got := s.resolveInboundAddress(ib); got != reqHost {
+			t.Fatalf("unknown-node address = %q, want subscriber host %q", got, reqHost)
+		}
+	})
+}
+
 func TestUnmarshalStreamSettings(t *testing.T) {
 	got := unmarshalStreamSettings(`{"network":"ws","wsSettings":{"path":"/api"}}`)
 	if got["network"] != "ws" {
@@ -627,6 +665,46 @@ func TestExtractKcpShareFields_ReadsAllFields(t *testing.T) {
 	}
 }
 
+func TestExtractKcpShareFields_FinalMaskLegacyHeader(t *testing.T) {
+	stream := map[string]any{
+		"finalmask": map[string]any{
+			"udp": []any{
+				map[string]any{
+					"type":     "mkcp-legacy",
+					"settings": map[string]any{"header": "wechat", "value": ""},
+				},
+			},
+		},
+	}
+	got := extractKcpShareFields(stream)
+	if got.headerType != "wechat-video" {
+		t.Fatalf("headerType = %q, want wechat-video", got.headerType)
+	}
+	if got.seed != "" {
+		t.Fatalf("seed = %q, want empty for header mask", got.seed)
+	}
+}
+
+func TestExtractKcpShareFields_FinalMaskLegacySeed(t *testing.T) {
+	stream := map[string]any{
+		"finalmask": map[string]any{
+			"udp": []any{
+				map[string]any{
+					"type":     "mkcp-legacy",
+					"settings": map[string]any{"header": "", "value": "obfs-pass"},
+				},
+			},
+		},
+	}
+	got := extractKcpShareFields(stream)
+	if got.headerType != "none" {
+		t.Fatalf("headerType = %q, want none for empty-header legacy mask", got.headerType)
+	}
+	if got.seed != "obfs-pass" {
+		t.Fatalf("seed = %q, want obfs-pass", got.seed)
+	}
+}
+
 func TestKcpShareFields_ApplyToParams(t *testing.T) {
 	params := map[string]string{}
 	kcpShareFields{headerType: "wechat-video", seed: "s", mtu: 1350, tti: 50}.applyToParams(params)
@@ -699,5 +777,39 @@ func TestHasFinalMaskContent(t *testing.T) {
 	}
 	if !hasFinalMaskContent(map[string]any{"x": 1}) {
 		t.Fatal("non-empty map should count as content")
+	}
+}
+
+func TestHysteriaHopPorts(t *testing.T) {
+	withHop := func(ports any) map[string]any {
+		return map[string]any{
+			"finalmask": map[string]any{
+				"quicParams": map[string]any{
+					"udpHop": map[string]any{"ports": ports, "interval": "5-10"},
+				},
+			},
+		}
+	}
+
+	cases := []struct {
+		name   string
+		stream map[string]any
+		want   string
+	}{
+		{"range", withHop("20000-50000"), "20000-50000"},
+		{"trimmed", withHop("  443,20000-50000  "), "443,20000-50000"},
+		{"empty string", withHop(""), ""},
+		{"non-string", withHop(float64(443)), ""},
+		{"no udpHop", map[string]any{"finalmask": map[string]any{"quicParams": map[string]any{}}}, ""},
+		{"no finalmask", map[string]any{}, ""},
+		{"nil stream", nil, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hysteriaHopPorts(tc.stream); got != tc.want {
+				t.Fatalf("hysteriaHopPorts() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
