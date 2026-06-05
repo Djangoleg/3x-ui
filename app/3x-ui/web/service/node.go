@@ -224,10 +224,7 @@ func (s *NodeService) GetAll() ([]*model.Node, error) {
 		Select("inbound_id, email, enable, total, up, down, expiry_time").
 		Where("inbound_id IN ?", inboundIDs).
 		Scan(&trafficRows).Error; err == nil {
-		online := make(map[string]struct{})
-		for _, email := range s.onlineEmails() {
-			online[email] = struct{}{}
-		}
+		onlineByNodeSet := s.onlineEmailsByNode()
 		depletedByNode := make(map[int]int)
 		onlineByNode := make(map[int]int)
 		for _, row := range trafficRows {
@@ -240,8 +237,12 @@ func (s *NodeService) GetAll() ([]*model.Node, error) {
 			if expired || exhausted || !row.Enable {
 				depletedByNode[nodeID]++
 			}
-			if _, ok := online[row.Email]; ok {
-				onlineByNode[nodeID]++
+			// Scope online by the node the inbound lives on: a client online
+			// on one node must not count as online on another.
+			if set, ok := onlineByNodeSet[nodeID]; ok {
+				if _, isOnline := set[row.Email]; isOnline {
+					onlineByNode[nodeID]++
+				}
 			}
 		}
 		for _, n := range nodes {
@@ -254,9 +255,18 @@ func (s *NodeService) GetAll() ([]*model.Node, error) {
 	return nodes, nil
 }
 
-func (s *NodeService) onlineEmails() []string {
+func (s *NodeService) onlineEmailsByNode() map[int]map[string]struct{} {
 	svc := InboundService{}
-	return svc.GetOnlineClients()
+	byNode := svc.GetOnlineClientsByNode()
+	out := make(map[int]map[string]struct{}, len(byNode))
+	for nodeID, emails := range byNode {
+		set := make(map[string]struct{}, len(emails))
+		for _, email := range emails {
+			set[email] = struct{}{}
+		}
+		out[nodeID] = set
+	}
+	return out
 }
 
 func (s *NodeService) GetById(id int) (*model.Node, error) {
@@ -372,6 +382,30 @@ func (s *NodeService) SetEnable(id int, enable bool) error {
 	return db.Model(model.Node{}).Where("id = ?", id).Update("enable", enable).Error
 }
 
+// GetWebCertFiles asks a node for its own web TLS certificate/key file paths,
+// used by "Set Cert from Panel" so a node-assigned inbound gets paths that
+// exist on the node rather than the central panel. See issue #4854.
+func (s *NodeService) GetWebCertFiles(id int) (*runtime.WebCertFiles, error) {
+	n, err := s.GetById(id)
+	if err != nil || n == nil {
+		return nil, fmt.Errorf("node not found")
+	}
+	if !n.Enable {
+		return nil, fmt.Errorf("node is disabled")
+	}
+	mgr := runtime.GetManager()
+	if mgr == nil {
+		return nil, fmt.Errorf("runtime manager unavailable")
+	}
+	remote, err := mgr.RemoteFor(n)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return remote.GetWebCertFiles(ctx)
+}
+
 // NodeUpdateResult reports the outcome of triggering a panel self-update on one
 // node so the UI can show per-node success/failure for a bulk request.
 type NodeUpdateResult struct {
@@ -444,6 +478,50 @@ func (s *NodeService) UpdateHeartbeat(id int, p HeartbeatPatch) error {
 		nodeMetrics.append(nodeMetricKey(id, "mem"), now, p.MemPct)
 	}
 	return nil
+}
+
+func (s *NodeService) MarkNodeDirty(id int) error {
+	if id <= 0 {
+		return nil
+	}
+	return database.GetDB().Model(model.Node{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"config_dirty":    true,
+			"config_dirty_at": time.Now().UnixMilli(),
+		}).Error
+}
+
+func (s *NodeService) ClearNodeDirty(id int, dirtyAt int64) error {
+	if id <= 0 {
+		return nil
+	}
+	return database.GetDB().Model(model.Node{}).
+		Where("id = ? AND config_dirty_at = ?", id, dirtyAt).
+		Update("config_dirty", false).Error
+}
+
+func (s *NodeService) NodeSyncState(id int) (enabled bool, status string, dirty bool, dirtyAt int64, err error) {
+	if id <= 0 {
+		return false, "", false, 0, errors.New("invalid node id")
+	}
+	var row model.Node
+	err = database.GetDB().Model(model.Node{}).
+		Select("enable", "status", "config_dirty", "config_dirty_at").
+		Where("id = ?", id).
+		First(&row).Error
+	if err != nil {
+		return false, "", false, 0, err
+	}
+	return row.Enable, row.Status, row.ConfigDirty, row.ConfigDirtyAt, nil
+}
+
+func (s *NodeService) IsNodePending(id int) bool {
+	enabled, status, dirty, _, err := s.NodeSyncState(id)
+	if err != nil {
+		return false
+	}
+	return !enabled || status != "online" || dirty
 }
 
 func nodeMetricKey(id int, metric string) string {

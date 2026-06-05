@@ -71,6 +71,7 @@ import type { ClientFilters } from './filters';
 import './ClientsPage.css';
 
 const FILTER_STATE_KEY = 'clientsFilterState';
+const DISABLED_PAGE_SIZE = 200;
 
 function UngroupIcon() {
   return (
@@ -276,10 +277,7 @@ export default function ClientsPage() {
   const activeCount = activeFilterCount(filters);
 
   useEffect(() => {
-    if (pageSize > 0) {
-
-      setTablePageSize(pageSize);
-    }
+    setTablePageSize(pageSize > 0 ? pageSize : DISABLED_PAGE_SIZE);
   }, [pageSize]);
 
   const onlineSet = useMemo(() => new Set(onlines || []), [onlines]);
@@ -445,7 +443,7 @@ export default function ClientsPage() {
   }
 
   function onResetTraffic(row: ClientRecord) {
-    if (!row?.email || !Array.isArray(row.inboundIds) || row.inboundIds.length === 0) {
+    if (!row?.email) {
       messageApi.warning(t('pages.clients.resetNotPossible'));
       return;
     }
