@@ -111,6 +111,13 @@ export default function SubPage() {
     if (ok) messageApi.success(t('copied'));
   }, [t, messageApi]);
 
+  const copyAll = useCallback(async () => {
+    if (links.length === 0) return;
+    const allLinks = links.join('\n');
+    const ok = await ClipboardManager.copyText(allLinks);
+    if (ok) messageApi.success(t('subscription.copyAllConfigsCopied'));
+  }, [t, messageApi]);
+
   const open = useCallback((url: string) => {
     if (!url) return;
     window.open(url, '_blank');
@@ -120,7 +127,7 @@ export default function SubPage() {
     if (!subUrl) return '';
     const separator = subUrl.includes('?') ? '&' : '?';
     const rawUrl = subUrl + separator + 'flag=shadowrocket';
-    const base64Url = btoa(rawUrl).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const base64Url = btoa(rawUrl);
     const remark = encodeURIComponent(subTitle || sId || 'Subscription');
     return `shadowrocket://add/sub/${base64Url}?remark=${remark}`;
   }, []);
@@ -393,6 +400,18 @@ export default function SubPage() {
                   <>
                     <Divider>{t('pages.inbounds.copyLink')}</Divider>
                     <div className="links-section">
+                      <div className="sub-link-row">
+                        <span className="sub-link-title">{t('subscription.copyAllConfigs')}</span>
+                        <div className="sub-link-actions">
+                          <Button
+                            size="small"
+                            icon={<CopyOutlined />}
+                            onClick={copyAll}
+                            aria-label={t('subscription.copyAllConfigs')}
+                            title={t('subscription.copyAllConfigs')}
+                          />
+                        </div>
+                      </div>
                       {links.map((link, idx) => {
                         const parts = parseLinkParts(link, linkEmails[idx] || '');
                         const fallback = `Link ${idx + 1}`;

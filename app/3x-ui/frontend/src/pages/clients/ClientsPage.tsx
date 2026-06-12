@@ -47,11 +47,14 @@ import {
 } from '@ant-design/icons';
 
 import { useTheme } from '@/hooks/useTheme';
+import { formatInboundLabel } from '@/lib/inbounds/label';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useClients } from '@/hooks/useClients';
+import { useNodesQuery } from '@/api/queries/useNodesQuery';
 import { useDatepicker } from '@/hooks/useDatepicker';
 import type { ClientRecord, InboundOption } from '@/hooks/useClients';
+import ClientTrafficCell from '@/components/clients/ClientTrafficCell';
 import AppSidebar from '@/layouts/AppSidebar';
 import { IntlUtil, SizeFormatter } from '@/utils';
 import { setMessageInstance } from '@/utils/messageBus';
@@ -146,6 +149,7 @@ function readFilterState(): PersistedFilterState {
         buckets: Array.isArray(fromRaw.buckets) ? fromRaw.buckets : [],
         protocols: Array.isArray(fromRaw.protocols) ? fromRaw.protocols : [],
         inboundIds: Array.isArray(fromRaw.inboundIds) ? fromRaw.inboundIds : [],
+        nodeIds: Array.isArray(fromRaw.nodeIds) ? fromRaw.nodeIds : [],
         groups: Array.isArray(fromRaw.groups) ? fromRaw.groups : [],
       },
       sort: typeof raw.sort === 'string' ? raw.sort : '',
@@ -194,7 +198,7 @@ export default function ClientsPage() {
     allGroups,
     setQuery,
     inbounds, onlines, loading, fetched, fetchError, subSettings,
-    ipLimitEnable, tgBotEnable, expireDiff, trafficDiff, pageSize,
+    tgBotEnable, expireDiff, trafficDiff, pageSize,
     create, update, remove, bulkDelete, bulkAdjust, bulkAddToGroup, bulkRemoveFromGroup, attach, bulkAttach, detach, bulkDetach,
     resetTraffic, resetAllTraffics, delDepleted, setEnable,
     applyTrafficEvent, applyClientStatsEvent,
@@ -206,6 +210,10 @@ export default function ClientsPage() {
     traffic: applyTrafficEvent,
     client_stats: applyClientStatsEvent,
   });
+
+  // Node list for the Nodes filter; the section only renders when the panel
+  // actually manages nodes (#4997).
+  const { nodes } = useNodesQuery();
 
   const [togglingEmail, setTogglingEmail] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -253,6 +261,23 @@ export default function ClientsPage() {
     setCurrentPage(1);
   }, [debouncedSearch, filters, sortColumn, sortOrder]);
 
+  // The node filter maps onto inbound ids client-side (#4997): the paging API
+  // already accepts an inbound CSV, so nodes never have to reach the backend.
+  // Sentinel 0 = "local panel" (inbounds without a nodeId).
+  const effectiveInboundCsv = useMemo(() => {
+    if (!filters.nodeIds.length) return filters.inboundIds.join(',');
+    const nodeSet = new Set(filters.nodeIds);
+    const nodeInboundIds = inbounds
+      .filter((ib) => nodeSet.has(ib.nodeId ?? 0))
+      .map((ib) => ib.id);
+    const pool = filters.inboundIds.length
+      ? nodeInboundIds.filter((id) => filters.inboundIds.includes(id))
+      : nodeInboundIds;
+    // Nothing matches the selected nodes: send an impossible id so the filter
+    // yields an honest empty result instead of being silently ignored.
+    return pool.length ? pool.join(',') : '-1';
+  }, [filters.nodeIds, filters.inboundIds, inbounds]);
+
   useEffect(() => {
     setQuery({
       page: currentPage,
@@ -260,7 +285,7 @@ export default function ClientsPage() {
       search: debouncedSearch,
       filter: filters.buckets.join(','),
       protocol: filters.protocols.join(','),
-      inbound: filters.inboundIds.join(','),
+      inbound: effectiveInboundCsv,
       expiryFrom: filters.expiryFrom,
       expiryTo: filters.expiryTo,
       usageFrom: gbToBytes(filters.usageFromGB),
@@ -272,7 +297,7 @@ export default function ClientsPage() {
       sort: sortColumn || undefined,
       order: sortOrder || undefined,
     });
-  }, [setQuery, currentPage, tablePageSize, debouncedSearch, filters, sortColumn, sortOrder]);
+  }, [setQuery, currentPage, tablePageSize, debouncedSearch, filters, effectiveInboundCsv, sortColumn, sortOrder]);
 
   const activeCount = activeFilterCount(filters);
 
@@ -302,7 +327,7 @@ export default function ClientsPage() {
 
   function inboundLabel(id: number) {
     const ib = inboundsById[id];
-    return ib?.remark?.trim() || ib?.tag || '';
+    return formatInboundLabel(ib?.tag, ib?.remark);
   }
 
   const clientBucket = useCallback((row: ClientRecord | null | undefined): Bucket | null => {
@@ -342,15 +367,6 @@ export default function ClientsPage() {
   // Sort is server-side now; the page already arrives in the requested
   // order, so we just hand it through.
   const sortedClients = filteredClients;
-
-  function trafficLabel(row: ClientRecord) {
-    const t0 = row.traffic;
-    if (!t0) return '-';
-    const used = (t0.up || 0) + (t0.down || 0);
-    const total = row.totalGB || 0;
-    if (total <= 0) return `${SizeFormatter.sizeFormat(used)} / ∞`;
-    return `${SizeFormatter.sizeFormat(used)} / ${SizeFormatter.sizeFormat(total)}`;
-  }
 
   function remainingLabel(row: ClientRecord) {
     const total = row.totalGB || 0;
@@ -692,7 +708,7 @@ export default function ClientsPage() {
           const ib = inboundsById[id];
           const proto = (ib?.protocol || '').toLowerCase();
           const color = INBOUND_PROTOCOL_COLORS[proto] ?? 'default';
-          const compactLabel = ib?.remark?.trim() || ib?.tag || '';
+          const compactLabel = formatInboundLabel(ib?.tag, ib?.remark);
           return (
             <Tooltip key={id} title={inboundLabel(id)}>
               <Tag color={color} style={{ margin: 2 }}>
@@ -726,7 +742,16 @@ export default function ClientsPage() {
     {
       title: t('pages.clients.traffic'),
       key: 'traffic',
-      render: (_v, record) => trafficLabel(record),
+      width: 240,
+      render: (_v, record) => (
+        <ClientTrafficCell
+          up={record.traffic?.up}
+          down={record.traffic?.down}
+          total={record.totalGB}
+          enabled={record.enable}
+          trafficDiff={trafficDiff}
+        />
+      ),
     },
     {
       title: t('pages.clients.remaining'),
@@ -744,7 +769,7 @@ export default function ClientsPage() {
       ),
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [t, togglingEmail, clientBucket, isOnline, inboundsById, filters, allGroups, datepicker]);
+  ], [t, togglingEmail, clientBucket, isOnline, inboundsById, filters, allGroups, datepicker, trafficDiff]);
 
   const tablePagination = {
     current: currentPage,
@@ -1139,7 +1164,9 @@ export default function ClientsPage() {
                                       checked={selectedRowKeys.includes(row.email)}
                                       onChange={(e) => toggleSelect(row.email, e.target.checked)}
                                     />
-                                    <Badge status={bucketBadgeStatus(bucket)} />
+                                    {row.enable && bucket !== 'depleted' && isOnline(row.email)
+                                      ? <span className="online-dot" style={{ marginInlineEnd: 0 }} />
+                                      : <Badge status={bucketBadgeStatus(bucket)} />}
                                     <span className="tag-name">{row.email}</span>
                                     {bucket === 'depleted' && <Tag color="red" className="status-tag">{t('depleted')}</Tag>}
                                     {bucket === 'expiring' && <Tag color="orange" className="status-tag">{t('depletingSoon')}</Tag>}
@@ -1186,6 +1213,14 @@ export default function ClientsPage() {
                                       </Dropdown>
                                     </div>
                                   </div>
+                                  <ClientTrafficCell
+                                    compact
+                                    up={row.traffic?.up}
+                                    down={row.traffic?.down}
+                                    total={row.totalGB}
+                                    enabled={row.enable}
+                                    trafficDiff={trafficDiff}
+                                  />
                                 </div>
                               );
                             })}
@@ -1207,7 +1242,6 @@ export default function ClientsPage() {
             client={editingClient}
             attachedIds={editingAttachedIds}
             inbounds={inbounds}
-            ipLimitEnable={ipLimitEnable}
             tgBotEnable={tgBotEnable}
             groups={allGroups}
             save={onSave}
@@ -1236,7 +1270,6 @@ export default function ClientsPage() {
           <ClientBulkAddModal
             open={bulkAddOpen}
             inbounds={inbounds}
-            ipLimitEnable={ipLimitEnable}
             groups={allGroups}
             onOpenChange={setBulkAddOpen}
             onSaved={() => setBulkAddOpen(false)}
@@ -1323,6 +1356,7 @@ export default function ClientsPage() {
             inbounds={inbounds}
             protocols={protocolOptions}
             groups={groupOptions}
+            nodes={nodes}
           />
         </LazyMount>
       </Layout>
