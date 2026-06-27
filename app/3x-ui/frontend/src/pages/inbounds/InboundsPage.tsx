@@ -16,7 +16,8 @@ import {
 
 import { setMessageInstance } from '@/utils/messageBus';
 import {
-  SwapOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
   PieChartOutlined,
   BarsOutlined,
 } from '@ant-design/icons';
@@ -81,6 +82,7 @@ export default function InboundsPage() {
     clientCount,
     onlineClients,
     lastOnlineMap,
+    inboundSpeed,
     totals,
     expireDiff,
     trafficDiff,
@@ -88,7 +90,6 @@ export default function InboundsPage() {
     subSettings,
     tgBotEnable,
     ipLimitEnable,
-    remarkModel,
     refresh,
     hydrateInbound,
     applyTrafficEvent,
@@ -99,7 +100,7 @@ export default function InboundsPage() {
   const [messageApi, messageContextHolder] = message.useMessage();
   useEffect(() => { setMessageInstance(messageApi); }, [messageApi]);
 
-  const { nodes: nodesList } = useNodesQuery();
+  const { nodes: nodesList, fetched: nodesFetched } = useNodesQuery();
   const nodesById = useMemo(() => {
     const map = new Map<number, ReturnType<typeof useNodesQuery>['nodes'][number]>();
     for (const n of nodesList || []) map.set(n.id, n);
@@ -263,13 +264,12 @@ export default function InboundsPage() {
       content: genInboundLinks({
         inbound: inboundFromDb(projected),
         remark: projected.remark,
-        remarkModel,
         hostOverride: hostOverrideFor(dbInbound),
         fallbackHostname: preferPublicHost(window.location.hostname, subSettings.publicHost),
       }),
       fileName: projected.remark || 'inbound',
     });
-  }, [checkFallback, remarkModel, hostOverrideFor, subSettings.publicHost, openText, t]);
+  }, [checkFallback, hostOverrideFor, subSettings.publicHost, openText, t]);
 
   const exportInboundClipboard = useCallback((dbInbound: DBInbound) => {
     openText({ title: t('pages.inbounds.inboundJsonTitle'), content: JSON.stringify(dbInbound, null, 2), json: true });
@@ -301,13 +301,12 @@ export default function InboundsPage() {
       out.push(genInboundLinks({
         inbound: inboundFromDb(projected),
         remark: projected.remark,
-        remarkModel,
         hostOverride: hostOverrideFor(ib),
         fallbackHostname: preferPublicHost(window.location.hostname, subSettings.publicHost),
       }));
     }
     openText({ title: t('pages.inbounds.exportAllLinksTitle'), content: out.join('\r\n'), fileName: t('pages.inbounds.exportAllLinksFileName') });
-  }, [dbInbounds, hydrateInbound, checkFallback, remarkModel, hostOverrideFor, subSettings.publicHost, openText, t]);
+  }, [dbInbounds, hydrateInbound, checkFallback, hostOverrideFor, subSettings.publicHost, openText, t]);
 
   const exportAllSubs = useCallback(async () => {
     const hydrated = await Promise.all(
@@ -585,8 +584,14 @@ export default function InboundsPage() {
                         <Col xs={12} sm={12} md={8}>
                           <Statistic
                             title={t('pages.inbounds.totalDownUp')}
-                            value={`${SizeFormatter.sizeFormat(totals.up)} / ${SizeFormatter.sizeFormat(totals.down)}`}
-                            prefix={<SwapOutlined />}
+                            value={0}
+                            formatter={() => (
+                              <span>
+                                <ArrowUpOutlined /> {SizeFormatter.sizeFormat(totals.up)}
+                                {' / '}
+                                <ArrowDownOutlined /> {SizeFormatter.sizeFormat(totals.down)}
+                              </span>
+                            )}
                           />
                         </Col>
                         <Col xs={12} sm={12} md={8}>
@@ -613,6 +618,7 @@ export default function InboundsPage() {
                       clientCount={clientCount}
                       onlineClients={onlineClients}
                       lastOnlineMap={lastOnlineMap}
+                      inboundSpeed={inboundSpeed}
                       expireDiff={expireDiff}
                       trafficDiff={trafficDiff}
                       pageSize={pageSize}
@@ -641,6 +647,7 @@ export default function InboundsPage() {
             dbInbound={formDbInbound}
             dbInbounds={dbInbounds}
             availableNodes={nodesList}
+            availableNodesFetched={nodesFetched}
           />
         </LazyMount>
         <LazyMount when={infoOpen}>
@@ -649,7 +656,6 @@ export default function InboundsPage() {
             onClose={() => setInfoOpen(false)}
             dbInbound={infoDbInbound}
             clientIndex={infoClientIndex}
-            remarkModel={remarkModel}
             expireDiff={expireDiff}
             trafficDiff={trafficDiff}
             ipLimitEnable={ipLimitEnable}
@@ -665,7 +671,6 @@ export default function InboundsPage() {
             onClose={() => setQrOpen(false)}
             dbInbound={qrDbInbound}
             client={null}
-            remarkModel={remarkModel}
             nodeAddress={qrNodeAddress}
             subSettings={subSettings}
           />

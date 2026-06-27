@@ -1,16 +1,12 @@
-import { useMemo } from 'react';
-import { Divider, Input, InputNumber, Select, Space, Switch, Tabs } from 'antd';
-import { ClockCircleOutlined, InfoCircleOutlined, SafetyCertificateOutlined, SettingOutlined } from '@ant-design/icons';
+import { Input, InputNumber, Switch, Tabs } from 'antd';
+import { BranchesOutlined, CompassOutlined, IdcardOutlined, InfoCircleOutlined, NodeIndexOutlined, SafetyCertificateOutlined, SettingOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import type { AllSetting } from '@/models/setting';
 import { SettingListItem } from '@/components/ui';
+import { RemarkTemplateField } from '@/components/form';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { catTabLabel } from './catTabLabel';
 import { sanitizePath, normalizePath } from './uriPath';
-
-const REMARK_MODELS: Record<string, string> = { i: 'Inbound', e: 'Email', o: 'Other' };
-const REMARK_SAMPLES: Record<string, string> = { i: 'Germany', e: 'john', o: 'Relay' };
-const REMARK_SEPARATORS = [' ', '-', '_', '@', ':', '~', '|', ',', '.', '/'];
 
 interface SubscriptionGeneralTabProps {
   allSetting: AllSetting;
@@ -20,30 +16,6 @@ interface SubscriptionGeneralTabProps {
 export default function SubscriptionGeneralTab({ allSetting, updateSetting }: SubscriptionGeneralTabProps) {
   const { t } = useTranslation();
   const { isMobile } = useMediaQuery();
-
-  const remarkModel = useMemo(() => {
-    const rm = allSetting.remarkModel || '';
-    return rm.length > 1 ? rm.substring(1).split('') : [];
-  }, [allSetting.remarkModel]);
-
-  const remarkSeparator = useMemo(() => {
-    const rm = allSetting.remarkModel || '-';
-    return rm.length > 1 ? rm.charAt(0) : '-';
-  }, [allSetting.remarkModel]);
-
-  const remarkSample = useMemo(() => {
-    const parts = remarkModel.map((k) => REMARK_SAMPLES[k]);
-    return parts.length === 0 ? '' : parts.join(remarkSeparator);
-  }, [remarkModel, remarkSeparator]);
-
-  function setRemarkModel(parts: string[]) {
-    updateSetting({ remarkModel: remarkSeparator + parts.join('') });
-  }
-
-  function setRemarkSeparator(sep: string) {
-    const tail = (allSetting.remarkModel || '-').substring(1);
-    updateSetting({ remarkModel: sep + tail });
-  }
 
   return (
     <Tabs defaultActiveKey="1" items={[
@@ -94,53 +66,30 @@ export default function SubscriptionGeneralTab({ allSetting, updateSetting }: Su
             <SettingListItem paddings="small" title={t('pages.settings.subEncrypt')} description={t('pages.settings.subEncryptDesc')}>
               <Switch checked={allSetting.subEncrypt} onChange={(v) => updateSetting({ subEncrypt: v })} />
             </SettingListItem>
-            <SettingListItem paddings="small" title={t('pages.settings.subShowInfo')} description={t('pages.settings.subShowInfoDesc')}>
-              <Switch checked={allSetting.subShowInfo} onChange={(v) => updateSetting({ subShowInfo: v })} />
-            </SettingListItem>
-            <SettingListItem paddings="small" title={t('pages.settings.subEmailInRemark')} description={t('pages.settings.subEmailInRemarkDesc')}>
-              <Switch checked={allSetting.subEmailInRemark} onChange={(v) => updateSetting({ subEmailInRemark: v })} />
-            </SettingListItem>
-
             <SettingListItem
               paddings="small"
-              title={t('pages.settings.remarkModel')}
-              description={
-                <>
-                  {t('pages.settings.sampleRemark')}:{' '}
-                  <span
-                    style={{
-                      fontFamily: 'monospace',
-                      padding: '1px 6px',
-                      borderRadius: 4,
-                      border: '1px solid var(--ant-color-border)',
-                      background: 'var(--ant-color-fill-tertiary)',
-                      whiteSpace: 'pre',
-                    }}
-                  >
-                    {remarkSample ? `#${remarkSample}` : '—'}
-                  </span>
-                </>
-              }
+              title={t('pages.settings.remarkTemplate')}
+              description={t('pages.settings.remarkTemplateDesc')}
             >
-              <Space.Compact style={{ width: '100%' }}>
-                <Select
-                  mode="multiple"
-                  value={remarkModel}
-                  onChange={setRemarkModel}
-                  style={{ paddingRight: '.5rem', minWidth: '80%', width: 'auto' }}
-                  options={Object.entries(REMARK_MODELS).map(([k, l]) => ({ value: k, label: l }))}
-                />
-                <Select
-                  value={remarkSeparator}
-                  onChange={setRemarkSeparator}
-                  style={{ width: '20%' }}
-                  options={REMARK_SEPARATORS.map((s) => ({ value: s, label: s === ' ' ? '␣' : s }))}
-                />
-              </Space.Compact>
+              <RemarkTemplateField
+                value={allSetting.remarkTemplate}
+                onChange={(v) => updateSetting({ remarkTemplate: v })}
+                maxLength={256}
+              />
             </SettingListItem>
 
-            <Divider>{t('pages.settings.subTitle')}</Divider>
-
+            <SettingListItem paddings="small" title={t('pages.settings.subUpdates')} description={t('pages.settings.subUpdatesDesc')}>
+              <InputNumber value={allSetting.subUpdates} min={1} style={{ width: '100%' }}
+                onChange={(v) => updateSetting({ subUpdates: Number(v) || 0 })} />
+            </SettingListItem>
+          </>
+        ),
+      },
+      {
+        key: '3',
+        label: catTabLabel(<IdcardOutlined />, t('pages.settings.profile'), isMobile),
+        children: (
+          <>
             <SettingListItem paddings="small" title={t('pages.settings.subTitle')} description={t('pages.settings.subTitleDesc')}>
               <Input value={allSetting.subTitle} onChange={(e) => updateSetting({ subTitle: e.target.value })} />
             </SettingListItem>
@@ -156,14 +105,47 @@ export default function SubscriptionGeneralTab({ allSetting, updateSetting }: Su
               <Input.TextArea value={allSetting.subAnnounce}
                 onChange={(e) => updateSetting({ subAnnounce: e.target.value })} />
             </SettingListItem>
-
-            <SettingListItem paddings="small" title={t('pages.settings.subThemeDir')} description={t('pages.settings.subThemeDirDesc')}>
+            <SettingListItem
+              paddings="small"
+              title={t('pages.settings.subThemeDir')}
+              description={(
+                <>
+                  {t('pages.settings.subThemeDirDesc')}{' '}
+                  <a
+                    href="https://github.com/MHSanaei/3x-ui/blob/main/docs/custom-subscription-templates.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {t('pages.settings.subThemeDirDocs')}
+                  </a>
+                </>
+              )}
+            >
               <Input value={allSetting.subThemeDir} placeholder="/etc/3x-ui/sub_templates/my-theme/"
                 onChange={(e) => updateSetting({ subThemeDir: e.target.value })} />
             </SettingListItem>
-
-            <Divider>Happ</Divider>
-
+          </>
+        ),
+      },
+      {
+        key: '4',
+        label: catTabLabel(<SafetyCertificateOutlined />, t('pages.settings.certs'), isMobile),
+        children: (
+          <>
+            <SettingListItem paddings="small" title={t('pages.settings.subCertPath')} description={t('pages.settings.subCertPathDesc')}>
+              <Input value={allSetting.subCertFile} onChange={(e) => updateSetting({ subCertFile: e.target.value })} />
+            </SettingListItem>
+            <SettingListItem paddings="small" title={t('pages.settings.subKeyPath')} description={t('pages.settings.subKeyPathDesc')}>
+              <Input value={allSetting.subKeyFile} onChange={(e) => updateSetting({ subKeyFile: e.target.value })} />
+            </SettingListItem>
+          </>
+        ),
+      },
+      {
+        key: '5',
+        label: catTabLabel(<BranchesOutlined />, 'Happ', isMobile),
+        children: (
+          <>
             <SettingListItem paddings="small" title={t('pages.settings.subEnableRouting')} description={t('pages.settings.subEnableRoutingDesc')}>
               <Switch checked={allSetting.subEnableRouting} onChange={(v) => updateSetting({ subEnableRouting: v })} />
             </SettingListItem>
@@ -171,9 +153,17 @@ export default function SubscriptionGeneralTab({ allSetting, updateSetting }: Su
               <Input.TextArea value={allSetting.subRoutingRules} placeholder="happ://routing/add/..."
                 onChange={(e) => updateSetting({ subRoutingRules: e.target.value })} />
             </SettingListItem>
-
-            <Divider>Clash / Mihomo</Divider>
-
+            <SettingListItem paddings="small" title={t('pages.settings.subHideSettings')} description={t('pages.settings.subHideSettingsDesc')}>
+              <Switch checked={allSetting.subHideSettings} onChange={(v) => updateSetting({ subHideSettings: v })} />
+            </SettingListItem>
+          </>
+        ),
+      },
+      {
+        key: '6',
+        label: catTabLabel(<NodeIndexOutlined />, 'Clash / Mihomo', isMobile),
+        children: (
+          <>
             <SettingListItem paddings="small" title={t('pages.settings.subClashEnableRouting')} description={t('pages.settings.subClashEnableRoutingDesc')}>
               <Switch checked={allSetting.subClashEnableRouting} onChange={(v) => updateSetting({ subClashEnableRouting: v })} />
             </SettingListItem>
@@ -189,27 +179,16 @@ export default function SubscriptionGeneralTab({ allSetting, updateSetting }: Su
         ),
       },
       {
-        key: '3',
-        label: catTabLabel(<SafetyCertificateOutlined />, t('pages.settings.certs'), isMobile),
+        key: '7',
+        label: catTabLabel(<CompassOutlined />, 'Incy', isMobile),
         children: (
           <>
-            <SettingListItem paddings="small" title={t('pages.settings.subCertPath')} description={t('pages.settings.subCertPathDesc')}>
-              <Input value={allSetting.subCertFile} onChange={(e) => updateSetting({ subCertFile: e.target.value })} />
+            <SettingListItem paddings="small" title={t('pages.settings.subIncyEnableRouting')} description={t('pages.settings.subIncyEnableRoutingDesc')}>
+              <Switch checked={allSetting.subIncyEnableRouting} onChange={(v) => updateSetting({ subIncyEnableRouting: v })} />
             </SettingListItem>
-            <SettingListItem paddings="small" title={t('pages.settings.subKeyPath')} description={t('pages.settings.subKeyPathDesc')}>
-              <Input value={allSetting.subKeyFile} onChange={(e) => updateSetting({ subKeyFile: e.target.value })} />
-            </SettingListItem>
-          </>
-        ),
-      },
-      {
-        key: '4',
-        label: catTabLabel(<ClockCircleOutlined />, t('pages.settings.intervals'), isMobile),
-        children: (
-          <>
-            <SettingListItem paddings="small" title={t('pages.settings.subUpdates')} description={t('pages.settings.subUpdatesDesc')}>
-              <InputNumber value={allSetting.subUpdates} min={1} style={{ width: '100%' }}
-                onChange={(v) => updateSetting({ subUpdates: Number(v) || 0 })} />
+            <SettingListItem paddings="small" title={t('pages.settings.subIncyRoutingRules')} description={t('pages.settings.subIncyRoutingRulesDesc')}>
+              <Input.TextArea value={allSetting.subIncyRoutingRules} placeholder="incy://routing/onadd/..."
+                onChange={(e) => updateSetting({ subIncyRoutingRules: e.target.value })} />
             </SettingListItem>
           </>
         ),

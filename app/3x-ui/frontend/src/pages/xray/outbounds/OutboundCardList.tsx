@@ -7,9 +7,8 @@ import {
   DeleteOutlined,
   VerticalAlignTopOutlined,
   ThunderboltOutlined,
-  CheckCircleFilled,
-  CloseCircleFilled,
   LoadingOutlined,
+  ExportOutlined,
 } from '@ant-design/icons';
 
 import { SizeFormatter } from '@/utils';
@@ -17,6 +16,7 @@ import { OutboundProtocols as Protocols } from '@/schemas/primitives';
 import type { OutboundTestState, OutboundTrafficRow } from '@/hooks/useXraySetting';
 
 import type { OutboundRow } from './outbounds-tab-types';
+import TestResultPopover from './TestResultPopover';
 import {
   isTesting,
   isUntestable,
@@ -51,7 +51,12 @@ export default function OutboundCardList({
 }: OutboundCardListProps) {
   const { t } = useTranslation();
   if (rows.length === 0) {
-    return <div className="card-empty">—</div>;
+    return (
+      <div className="card-empty">
+        <ExportOutlined style={{ fontSize: 32, marginBottom: 8 }} />
+        <div>{t('noData')}</div>
+      </div>
+    );
   }
   return (
     <>
@@ -102,10 +107,7 @@ export default function OutboundCardList({
             <span className="traffic-down">↓ {SizeFormatter.sizeFormat(trafficFor(outboundsTraffic, record).down)}</span>
             <span className="card-test">
               {testResult(outboundTestStates, index) ? (
-                <span className={testResult(outboundTestStates, index)!.success ? 'pill-ok' : 'pill-fail'}>
-                  {testResult(outboundTestStates, index)!.success ? <CheckCircleFilled /> : <CloseCircleFilled />}
-                  {testResult(outboundTestStates, index)!.success ? <span>{testResult(outboundTestStates, index)!.delay}&nbsp;ms</span> : <span>failed</span>}
-                </span>
+                <TestResultPopover result={testResult(outboundTestStates, index)!} />
               ) : isTesting(outboundTestStates, index) ? (
                 <LoadingOutlined />
               ) : null}
@@ -114,7 +116,7 @@ export default function OutboundCardList({
                 shape="circle"
                 size="small"
                 loading={isTesting(outboundTestStates, index)}
-                disabled={isUntestable(record, testMode) || isTesting(outboundTestStates, index)}
+                disabled={isUntestable(record) || isTesting(outboundTestStates, index)}
                 icon={<ThunderboltOutlined />}
                 onClick={() => onTest(index, testMode)}
               />

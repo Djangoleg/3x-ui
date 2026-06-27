@@ -14,11 +14,13 @@ import (
 	"github.com/mhsanaei/3x-ui/v3/internal/database"
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 	"github.com/mhsanaei/3x-ui/v3/internal/logger"
+	"github.com/mhsanaei/3x-ui/v3/internal/mtproto"
 	"github.com/mhsanaei/3x-ui/v3/internal/util/common"
 	"github.com/mhsanaei/3x-ui/v3/internal/util/netsafe"
 	"github.com/mhsanaei/3x-ui/v3/internal/xray"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type InboundService struct {
@@ -422,8 +424,10 @@ func (s *InboundService) getAllEmailSubIDs() (map[string]string, error) {
 }
 
 // normalizeStreamSettings clears StreamSettings for protocols that don't use it.
-// Only vmess, vless, trojan, shadowsocks, hysteria, and wireguard protocols use
-// streamSettings (wireguard for finalmask UDP masks and sockopt on its listener).
+// Only vmess, vless, trojan, shadowsocks, hysteria, wireguard, and tunnel
+// protocols use streamSettings (wireguard for finalmask UDP masks and sockopt on
+// its listener; tunnel for sockopt, notably sockopt.tproxy for its TProxy/redirect
+// mode).
 func (s *InboundService) normalizeStreamSettings(inbound *model.Inbound) {
 	protocolsWithStream := map[model.Protocol]bool{
 		model.VMESS:       true,
@@ -432,6 +436,7 @@ func (s *InboundService) normalizeStreamSettings(inbound *model.Inbound) {
 		model.Shadowsocks: true,
 		model.Hysteria:    true,
 		model.WireGuard:   true,
+		model.Tunnel:      true,
 	}
 
 	if !protocolsWithStream[inbound.Protocol] {
@@ -450,6 +455,108 @@ func (s *InboundService) normalizeMtprotoSecret(inbound *model.Inbound) {
 	}
 }
 
+// mtprotoRoutesThroughXray reports whether an mtproto inbound is configured to
+// egress through the core's router (the loopback SOCKS bridge in §xray.go).
+func mtprotoRoutesThroughXray(inbound *model.Inbound) bool {
+	if inbound == nil || inbound.Protocol != model.MTProto {
+		return false
+	}
+	var parsed struct {
+		RouteThroughXray bool `json:"routeThroughXray"`
+	}
+	if err := json.Unmarshal([]byte(inbound.Settings), &parsed); err != nil {
+		return false
+	}
+	return parsed.RouteThroughXray
+}
+
+func settingsRouteXrayPort(parsed map[string]any) int {
+	switch v := parsed["routeXrayPort"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n)
+		}
+	}
+	return 0
+}
+
+func parseRouteXrayPort(settings string) int {
+	if settings == "" {
+		return 0
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		return 0
+	}
+	return settingsRouteXrayPort(parsed)
+}
+
+// normalizeMtprotoXrayPort guarantees a routed mtproto inbound carries a stable
+// loopback egress port in its settings, so the generated Xray SOCKS bridge and
+// the mtg sidecar agree on where mtg dials out. The port is backend-owned: it is
+// allocated once when routing is first enabled and preserved across edits
+// (carried over from oldSettings, which wins over any value the client echoed
+// back). When routing is off it — together with the now-inert outbound
+// selection — is stripped so a disabled bridge leaves nothing stale behind.
+//
+// It returns an error when an egress port cannot be allocated or persisted, so
+// the caller refuses the save rather than storing a routed-but-portless inbound,
+// which would otherwise route no traffic and have its mtg metrics skipped (see
+// mtproto_job) — silently losing its accounting.
+func (s *InboundService) normalizeMtprotoXrayPort(inbound *model.Inbound, oldSettings string) error {
+	if inbound.Protocol != model.MTProto {
+		return nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(inbound.Settings), &parsed); err != nil || parsed == nil {
+		return nil
+	}
+	routed, _ := parsed["routeThroughXray"].(bool)
+	if !routed {
+		_, hadPort := parsed["routeXrayPort"]
+		_, hadTag := parsed["outboundTag"]
+		if !hadPort && !hadTag {
+			return nil
+		}
+		delete(parsed, "routeXrayPort")
+		delete(parsed, "outboundTag")
+		if bs, err := json.MarshalIndent(parsed, "", "  "); err == nil {
+			inbound.Settings = string(bs)
+		} else {
+			logger.Warning("mtproto: failed to marshal settings after disabling routing:", err)
+		}
+		return nil
+	}
+
+	// Prefer the already-stored port (carried across edits), then any value the
+	// client sent, then allocate a fresh one.
+	port := parseRouteXrayPort(oldSettings)
+	if port <= 0 {
+		port = settingsRouteXrayPort(parsed)
+	}
+	if port <= 0 {
+		allocated, err := mtproto.FreeLocalPort()
+		if err != nil {
+			return common.NewError("mtproto: could not allocate an Xray egress port:", err)
+		}
+		port = allocated
+	}
+	if settingsRouteXrayPort(parsed) == port {
+		return nil
+	}
+	parsed["routeXrayPort"] = port
+	bs, err := json.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		return common.NewError("mtproto: could not persist the Xray egress port:", err)
+	}
+	inbound.Settings = string(bs)
+	return nil
+}
+
 // AddInbound creates a new inbound configuration.
 // It validates port uniqueness, client email uniqueness, and required fields,
 // then saves the inbound to the database and optionally adds it to the running Xray instance.
@@ -458,6 +565,9 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	// Normalize streamSettings based on protocol
 	s.normalizeStreamSettings(inbound)
 	s.normalizeMtprotoSecret(inbound)
+	if err := s.normalizeMtprotoXrayPort(inbound, ""); err != nil {
+		return inbound, false, err
+	}
 	inbound.SubSortIndex = normalizeSubSortIndex(inbound.SubSortIndex)
 	if err := normalizeInboundShareAddressStrict(inbound); err != nil {
 		return inbound, false, err
@@ -512,6 +622,12 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		}
 	}
 
+	// Defensively fix any Shadowsocks-2022 client PSK whose length doesn't match
+	// the inbound method (e.g. an API caller supplied a wrong-size key).
+	if normalized, changed := normalizeShadowsocksClientKeys(inbound.Settings); changed {
+		inbound.Settings = normalized
+	}
+
 	// Secure client ID
 	for _, client := range clients {
 		switch inbound.Protocol {
@@ -550,15 +666,39 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		}
 	}()
 
-	err = tx.Save(inbound).Error
-	if err == nil {
-		if len(inbound.ClientStats) == 0 {
-			for _, client := range clients {
-				s.AddClientStat(tx, inbound.Id, &client)
-			}
-		}
-	} else {
+	// Omit the ClientStats has-many association: GORM's cascade would INSERT
+	// those rows with an ON CONFLICT target on the primary key only, which
+	// collides with the globally-unique client_traffics.email when an imported
+	// inbound carries clients that another inbound already created (e.g.
+	// importing two inbounds that share the same clients). We insert the stats
+	// ourselves below with the same email-conflict guard AddClientStat uses.
+	err = tx.Omit("ClientStats").Save(inbound).Error
+	if err != nil {
 		return inbound, false, err
+	}
+	// Imported stats first, so their traffic counters survive; emails that
+	// already own a (shared) row are skipped instead of tripping the unique
+	// constraint.
+	for i := range inbound.ClientStats {
+		if inbound.ClientStats[i].Email == "" {
+			continue
+		}
+		inbound.ClientStats[i].Id = 0
+		inbound.ClientStats[i].InboundId = inbound.Id
+		if err = tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "email"}},
+			DoNothing: true,
+		}).Create(&inbound.ClientStats[i]).Error; err != nil {
+			return inbound, false, err
+		}
+	}
+	// Then make sure every client has a stats row. AddClientStat is a no-op
+	// where one exists (including the rows just inserted), and fills the gap
+	// for clients an import payload didn't carry stats for.
+	for _, client := range clients {
+		if err = s.AddClientStat(tx, inbound.Id, &client); err != nil {
+			return inbound, false, err
+		}
 	}
 
 	if err = s.clientService.SyncInbound(tx, inbound.Id, clients); err != nil {
@@ -595,6 +735,13 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 				}
 			}
 		}
+	}
+
+	// A routed mtproto inbound is not an Xray inbound itself, so the runtime
+	// push above only (re)starts the mtg sidecar. The egress SOCKS bridge lives
+	// in the generated config, so force a regen to wire it in.
+	if mtprotoRoutesThroughXray(inbound) {
+		needRestart = true
 	}
 
 	return inbound, needRestart, err
@@ -641,7 +788,21 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		return false, err
 	}
 
+	// Drop the deleted inbound's tag from any routing rules / loopback outbounds
+	// in xrayTemplateConfig so they don't point at a tag that no longer exists.
+	if loadErr == nil && ib.Tag != "" {
+		if routingChanged, syncErr := (&XraySettingService{}).RemoveInboundTagReferences(ib.Tag); syncErr != nil {
+			logger.Warning("DelInbound: sync routing on inbound delete failed:", syncErr)
+		} else if routingChanged {
+			needRestart = true
+		}
+	}
+
 	if err := db.Delete(model.Inbound{}, id).Error; err != nil {
+		return needRestart, err
+	}
+	// Hosts have no hard FK; drop the inbound's hosts alongside it.
+	if err := db.Where("inbound_id = ?", id).Delete(&model.Host{}).Error; err != nil {
 		return needRestart, err
 	}
 	if markDirty && ib.NodeID != nil {
@@ -659,6 +820,10 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 				return needRestart, err
 			}
 		}
+	}
+	// Drop the egress SOCKS bridge a routed mtproto inbound left in the config.
+	if mtprotoRoutesThroughXray(&ib) {
+		needRestart = true
 	}
 	return needRestart, nil
 }
@@ -802,187 +967,233 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		return inbound, false, err
 	}
 	inbound.NodeID = oldInbound.NodeID
+	// Capture the pre-edit routing state before oldInbound.Settings is replaced
+	// with the new settings further down, then ensure a routed inbound keeps a
+	// stable egress port (reusing the one already stored).
+	oldRoutedMtproto := mtprotoRoutesThroughXray(oldInbound)
+	if err := s.normalizeMtprotoXrayPort(inbound, oldInbound.Settings); err != nil {
+		return inbound, false, err
+	}
 
 	tag := oldInbound.Tag
 	oldBits := inboundTransports(oldInbound.Protocol, oldInbound.StreamSettings, oldInbound.Settings)
 	oldTagWasAuto := isAutoGeneratedTag(tag, oldInbound.Port, oldInbound.NodeID, oldBits)
 
-	db := database.GetDB()
-	tx := db.Begin()
-
-	markDirty := false
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-			return
-		}
-		tx.Commit()
-		if markDirty && oldInbound.NodeID != nil {
-			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-				logger.Warning("mark node dirty failed:", dErr)
-			}
-		}
-	}()
-
-	err = s.updateClientTraffics(tx, oldInbound, inbound)
-	if err != nil {
-		return inbound, false, err
-	}
-
-	// Ensure created_at and updated_at exist in inbound.Settings clients
-	{
-		var oldSettings map[string]any
-		_ = json.Unmarshal([]byte(oldInbound.Settings), &oldSettings)
-		emailToCreated := map[string]int64{}
-		emailToUpdated := map[string]int64{}
-		if oldSettings != nil {
-			if oc, ok := oldSettings["clients"].([]any); ok {
-				for _, it := range oc {
-					if m, ok2 := it.(map[string]any); ok2 {
-						if email, ok3 := m["email"].(string); ok3 {
-							switch v := m["created_at"].(type) {
-							case float64:
-								emailToCreated[email] = int64(v)
-							case int64:
-								emailToCreated[email] = v
-							}
-							switch v := m["updated_at"].(type) {
-							case float64:
-								emailToUpdated[email] = int64(v)
-							case int64:
-								emailToUpdated[email] = v
-							}
-						}
-					}
-				}
-			}
-		}
-		var newSettings map[string]any
-		if err2 := json.Unmarshal([]byte(inbound.Settings), &newSettings); err2 == nil && newSettings != nil {
-			now := time.Now().Unix() * 1000
-			if nSlice, ok := newSettings["clients"].([]any); ok {
-				for i := range nSlice {
-					if m, ok2 := nSlice[i].(map[string]any); ok2 {
-						email, _ := m["email"].(string)
-						if _, ok3 := m["created_at"]; !ok3 {
-							if v, ok4 := emailToCreated[email]; ok4 && v > 0 {
-								m["created_at"] = v
-							} else {
-								m["created_at"] = now
-							}
-						}
-						// Preserve client's updated_at if present; do not bump on parent inbound update
-						if _, hasUpdated := m["updated_at"]; !hasUpdated {
-							if v, ok4 := emailToUpdated[email]; ok4 && v > 0 {
-								m["updated_at"] = v
-							}
-						}
-						nSlice[i] = m
-					}
-				}
-				newSettings["clients"] = nSlice
-				if bs, err3 := json.MarshalIndent(newSettings, "", "  "); err3 == nil {
-					inbound.Settings = string(bs)
-				}
-			}
-		}
-	}
-
-	oldInbound.Total = inbound.Total
-	oldInbound.Remark = inbound.Remark
-	oldInbound.SubSortIndex = inbound.SubSortIndex
-	oldInbound.Enable = inbound.Enable
-	oldInbound.ExpiryTime = inbound.ExpiryTime
-	oldInbound.TrafficReset = inbound.TrafficReset
-	oldInbound.Listen = inbound.Listen
-	oldInbound.Port = inbound.Port
-	oldInbound.Protocol = inbound.Protocol
-	oldInbound.Settings = inbound.Settings
-	oldInbound.StreamSettings = inbound.StreamSettings
-	oldInbound.Sniffing = inbound.Sniffing
-	if strings.TrimSpace(inbound.ShareAddrStrategy) == "" {
-		normalizeInboundShareAddress(oldInbound)
-		inbound.ShareAddrStrategy = oldInbound.ShareAddrStrategy
-		inbound.ShareAddr = oldInbound.ShareAddr
-	} else {
-		if err := normalizeInboundShareAddressStrict(inbound); err != nil {
-			return inbound, false, err
-		}
-		oldInbound.ShareAddrStrategy = inbound.ShareAddrStrategy
-		oldInbound.ShareAddr = inbound.ShareAddr
-	}
-	if oldTagWasAuto && inbound.Tag == tag {
-		inbound.Tag = ""
-	}
-	oldInbound.Tag, err = s.resolveInboundTag(inbound, inbound.Id)
-	if err != nil {
-		return inbound, false, err
-	}
-	inbound.Tag = oldInbound.Tag
-
 	needRestart := false
-	rt, push, dirty, perr := s.nodePushPlan(oldInbound)
-	if perr != nil {
-		err = perr
-		return inbound, false, err
-	}
-	if dirty {
-		markDirty = true
-	}
-	if oldInbound.NodeID == nil {
-		if !push {
-			needRestart = true
-		} else {
-			oldSnapshot := *oldInbound
-			oldSnapshot.Tag = tag
-			if err2 := rt.DelInbound(context.Background(), &oldSnapshot); err2 == nil {
-				logger.Debug("Old inbound deleted on", rt.Name(), ":", tag)
+	markDirty := false
+
+	// Persist the client-stat sync, settings munging, runtime push and inbound
+	// save as one transaction routed through the serial traffic writer, so it
+	// never runs concurrently with the @every 5s traffic poll. Both touch
+	// client_traffics and inbounds in opposite order, which Postgres aborts as a
+	// deadlock (40P01); serializing removes the contention (runSerializedTx).
+	//
+	// The runtime push stays inside the transaction here (unlike the client-edit
+	// paths that apply it after commit): EnsureInboundTagAllowed must reach the
+	// node before the central row is committed, or a "selected"-mode node would
+	// sweep the renamed inbound on its next pull. Inbound edits are rare, so
+	// holding the writer across the node call is an acceptable trade.
+	txErr := runSerializedTx(func(tx *gorm.DB) error {
+		if err := s.updateClientTraffics(tx, oldInbound, inbound); err != nil {
+			return err
+		}
+
+		// Ensure created_at and updated_at exist in inbound.Settings clients
+		{
+			var oldSettings map[string]any
+			_ = json.Unmarshal([]byte(oldInbound.Settings), &oldSettings)
+			emailToCreated := map[string]int64{}
+			emailToUpdated := map[string]int64{}
+			if oldSettings != nil {
+				if oc, ok := oldSettings["clients"].([]any); ok {
+					for _, it := range oc {
+						if m, ok2 := it.(map[string]any); ok2 {
+							if email, ok3 := m["email"].(string); ok3 {
+								switch v := m["created_at"].(type) {
+								case float64:
+									emailToCreated[email] = int64(v)
+								case int64:
+									emailToCreated[email] = v
+								}
+								switch v := m["updated_at"].(type) {
+								case float64:
+									emailToUpdated[email] = int64(v)
+								case int64:
+									emailToUpdated[email] = v
+								}
+							}
+						}
+					}
+				}
 			}
-			if inbound.Enable {
-				runtimeInbound, err2 := s.buildRuntimeInboundForAPI(tx, oldInbound)
-				if err2 != nil {
-					logger.Debug("Unable to prepare runtime inbound config:", err2)
-					needRestart = true
-				} else if err2 := rt.AddInbound(context.Background(), runtimeInbound); err2 == nil {
-					logger.Debug("Updated inbound added on", rt.Name(), ":", oldInbound.Tag)
-				} else {
-					logger.Debug("Unable to update inbound on", rt.Name(), ":", err2)
-					needRestart = true
+			var newSettings map[string]any
+			if err2 := json.Unmarshal([]byte(inbound.Settings), &newSettings); err2 == nil && newSettings != nil {
+				now := time.Now().Unix() * 1000
+				if nSlice, ok := newSettings["clients"].([]any); ok {
+					for i := range nSlice {
+						if m, ok2 := nSlice[i].(map[string]any); ok2 {
+							email, _ := m["email"].(string)
+							if _, ok3 := m["created_at"]; !ok3 {
+								if v, ok4 := emailToCreated[email]; ok4 && v > 0 {
+									m["created_at"] = v
+								} else {
+									m["created_at"] = now
+								}
+							}
+							// Preserve client's updated_at if present; do not bump on parent inbound update
+							if _, hasUpdated := m["updated_at"]; !hasUpdated {
+								if v, ok4 := emailToUpdated[email]; ok4 && v > 0 {
+									m["updated_at"] = v
+								}
+							}
+							nSlice[i] = m
+						}
+					}
+					newSettings["clients"] = nSlice
+					if bs, err3 := json.MarshalIndent(newSettings, "", "  "); err3 == nil {
+						inbound.Settings = string(bs)
+					}
 				}
 			}
 		}
-	} else if push {
-		oldSnapshot := *oldInbound
-		oldSnapshot.Tag = tag
-		if !inbound.Enable {
-			if err2 := rt.DelInbound(context.Background(), &oldSnapshot); err2 != nil {
-				logger.Warning("Unable to disable inbound on", rt.Name(), ":", err2)
-				markDirty = true
+
+		// A Shadowsocks-2022 method change resizes the key, but existing client PSKs
+		// keep their old length and would be rejected by xray. Regenerate mismatched
+		// client keys so the inbound stays connectable.
+		if normalized, changed := normalizeShadowsocksClientKeys(inbound.Settings); changed {
+			inbound.Settings = normalized
+			logger.Warning("Shadowsocks inbound", inbound.Id, "method change resized keys; regenerated mismatched client PSK(s)")
+		}
+
+		// Re-gate Vision flow now that the new stream/encryption is known: if this
+		// VLESS inbound just became flow-eligible (e.g. vlessenc was enabled on an
+		// XHTTP inbound), restore Vision for clients whose intended flow is Vision
+		// but was stripped while the inbound was ineligible.
+		if restored, changed := s.restoreVisionFlowForEligibleInbound(tx, inbound.Settings, inbound.StreamSettings, inbound.Protocol); changed {
+			inbound.Settings = restored
+		}
+
+		oldInbound.Total = inbound.Total
+		oldInbound.Remark = inbound.Remark
+		oldInbound.SubSortIndex = inbound.SubSortIndex
+		oldInbound.Enable = inbound.Enable
+		oldInbound.ExpiryTime = inbound.ExpiryTime
+		oldInbound.TrafficReset = inbound.TrafficReset
+		oldInbound.Listen = inbound.Listen
+		oldInbound.Port = inbound.Port
+		oldInbound.Protocol = inbound.Protocol
+		oldInbound.Settings = inbound.Settings
+		oldInbound.StreamSettings = inbound.StreamSettings
+		oldInbound.Sniffing = inbound.Sniffing
+		if strings.TrimSpace(inbound.ShareAddrStrategy) == "" {
+			normalizeInboundShareAddress(oldInbound)
+			inbound.ShareAddrStrategy = oldInbound.ShareAddrStrategy
+			inbound.ShareAddr = oldInbound.ShareAddr
+		} else {
+			if err := normalizeInboundShareAddressStrict(inbound); err != nil {
+				return err
 			}
-		} else if err2 := rt.UpdateInbound(context.Background(), &oldSnapshot, oldInbound); err2 != nil {
-			logger.Warning("Unable to update inbound on", rt.Name(), ":", err2)
+			oldInbound.ShareAddrStrategy = inbound.ShareAddrStrategy
+			oldInbound.ShareAddr = inbound.ShareAddr
+		}
+		if oldTagWasAuto && inbound.Tag == tag {
+			inbound.Tag = ""
+		}
+		resolvedTag, err := s.resolveInboundTag(inbound, inbound.Id)
+		if err != nil {
+			return err
+		}
+		oldInbound.Tag = resolvedTag
+		inbound.Tag = oldInbound.Tag
+
+		rt, push, dirty, perr := s.nodePushPlan(oldInbound)
+		if perr != nil {
+			return perr
+		}
+		if dirty {
 			markDirty = true
 		}
-	}
+		if oldInbound.NodeID == nil {
+			if !push {
+				needRestart = true
+			} else {
+				oldSnapshot := *oldInbound
+				oldSnapshot.Tag = tag
+				if err2 := rt.DelInbound(context.Background(), &oldSnapshot); err2 == nil {
+					logger.Debug("Old inbound deleted on", rt.Name(), ":", tag)
+				}
+				if inbound.Enable {
+					runtimeInbound, err2 := s.buildRuntimeInboundForAPI(tx, oldInbound)
+					if err2 != nil {
+						logger.Debug("Unable to prepare runtime inbound config:", err2)
+						needRestart = true
+					} else if err2 := rt.AddInbound(context.Background(), runtimeInbound); err2 == nil {
+						logger.Debug("Updated inbound added on", rt.Name(), ":", oldInbound.Tag)
+					} else {
+						logger.Debug("Unable to update inbound on", rt.Name(), ":", err2)
+						needRestart = true
+					}
+				}
+			}
+		} else if push {
+			oldSnapshot := *oldInbound
+			oldSnapshot.Tag = tag
+			if !inbound.Enable {
+				if err2 := rt.DelInbound(context.Background(), &oldSnapshot); err2 != nil {
+					logger.Warning("Unable to disable inbound on", rt.Name(), ":", err2)
+					markDirty = true
+				}
+			} else if err2 := rt.UpdateInbound(context.Background(), &oldSnapshot, oldInbound); err2 != nil {
+				logger.Warning("Unable to update inbound on", rt.Name(), ":", err2)
+				markDirty = true
+			}
+		}
 
-	// A rename must allow the new tag before the deferred commit, or a node in
-	// "selected" sync mode would sweep the renamed central row on the next pull.
-	if oldInbound.NodeID != nil {
-		if aErr := (&NodeService{}).EnsureInboundTagAllowed(*oldInbound.NodeID, oldInbound.Tag); aErr != nil {
-			logger.Warning("allow inbound tag on node failed:", aErr)
+		// A rename must allow the new tag before the inbound row is committed, or a
+		// node in "selected" sync mode would sweep the renamed central row on the
+		// next pull.
+		if oldInbound.NodeID != nil {
+			if aErr := (&NodeService{}).EnsureInboundTagAllowed(*oldInbound.NodeID, oldInbound.Tag); aErr != nil {
+				logger.Warning("allow inbound tag on node failed:", aErr)
+			}
+		}
+
+		if err := tx.Save(oldInbound).Error; err != nil {
+			return err
+		}
+		newClients, gcErr := s.GetClients(oldInbound)
+		if gcErr != nil {
+			return gcErr
+		}
+		if err := s.clientService.SyncInbound(tx, oldInbound.Id, newClients); err != nil {
+			return err
+		}
+		// (Re)generate the Xray config whenever routing was or is now enabled, so
+		// the egress SOCKS bridge is added, moved, or dropped to match the new
+		// settings.
+		if mtprotoRoutesThroughXray(inbound) || oldRoutedMtproto {
+			needRestart = true
+		}
+		return nil
+	})
+	if txErr != nil {
+		return inbound, false, txErr
+	}
+	// After the rename is committed, point any routing rules / loopback outbounds
+	// in xrayTemplateConfig at the new tag (oldInbound.Tag now holds the resolved
+	// new tag; tag holds the pre-edit one). Done post-commit so a sync failure
+	// can't roll back the inbound edit.
+	if tag != oldInbound.Tag {
+		if routingChanged, syncErr := (&XraySettingService{}).PropagateInboundTagRename(tag, oldInbound.Tag); syncErr != nil {
+			logger.Warning("UpdateInbound: sync routing on tag rename failed:", syncErr)
+		} else if routingChanged {
+			needRestart = true
 		}
 	}
-
-	if err = tx.Save(oldInbound).Error; err != nil {
-		return inbound, false, err
-	}
-	newClients, gcErr := s.GetClients(oldInbound)
-	if gcErr != nil {
-		err = gcErr
-		return inbound, false, err
-	}
-	if err = s.clientService.SyncInbound(tx, oldInbound.Id, newClients); err != nil {
-		return inbound, false, err
+	if markDirty && oldInbound.NodeID != nil {
+		if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+			logger.Warning("mark node dirty failed:", dErr)
+		}
 	}
 	return inbound, needRestart, nil
 }
