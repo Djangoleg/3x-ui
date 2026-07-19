@@ -95,6 +95,7 @@ func TestListenIsInternalOnly(t *testing.T) {
 }
 
 func TestResolveInboundAddress(t *testing.T) {
+	initSubDB(t)
 	const reqHost = "sub.example.com"
 
 	// A routable bind Listen (a real IP or hostname the operator set as the
@@ -1012,6 +1013,21 @@ func TestMarshalFinalMask_UnknownTypeIsDropped(t *testing.T) {
 	}
 	if _, ok := marshalFinalMask(fm); ok {
 		t.Fatal("unknown mask types should be dropped, leaving nothing to marshal")
+	}
+}
+
+func TestMarshalFinalMask_KeepsXmcTcpMask(t *testing.T) {
+	fm := map[string]any{
+		"tcp": []any{
+			map[string]any{"type": "xmc", "settings": map[string]any{"password": "p"}},
+		},
+	}
+	out, ok := marshalFinalMask(fm)
+	if !ok {
+		t.Fatal("expected ok=true for an xmc tcp mask")
+	}
+	if !strings.Contains(out, "xmc") {
+		t.Fatalf("marshaled finalmask dropped the xmc mask: %s", out)
 	}
 }
 

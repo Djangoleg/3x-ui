@@ -29,7 +29,10 @@ func (s *XraySettingService) SaveXraySetting(newXraySettings string) error {
 	if hoisted, err := EnsureStatsRouting(newXraySettings); err == nil {
 		newXraySettings = hoisted
 	}
-	return s.SettingService.saveSetting("xrayTemplateConfig", newXraySettings)
+	if synced, err := EnsureDnsServerRouting(newXraySettings); err == nil {
+		newXraySettings = synced
+	}
+	return s.saveSetting("xrayTemplateConfig", newXraySettings)
 }
 
 func (s *XraySettingService) CheckXrayConfig(XrayTemplateConfig string) error {
@@ -37,6 +40,21 @@ func (s *XraySettingService) CheckXrayConfig(XrayTemplateConfig string) error {
 	err := json.Unmarshal([]byte(XrayTemplateConfig), xrayConfig)
 	if err != nil {
 		return common.NewError("xray template config invalid:", err)
+	}
+	if len(xrayConfig.OutboundConfigs) > 0 {
+		var outbounds []json.RawMessage
+		if err := json.Unmarshal(xrayConfig.OutboundConfigs, &outbounds); err != nil {
+			return common.NewError("xray template config invalid: outbounds is not an array:", err)
+		}
+		for _, outbound := range outbounds {
+			if err := xray.ValidateOutboundConfig(outbound); err != nil {
+				tagged := struct {
+					Tag string `json:"tag"`
+				}{}
+				_ = json.Unmarshal(outbound, &tagged)
+				return common.NewError("xray core rejects outbound \""+tagged.Tag+"\":", err)
+			}
+		}
 	}
 	return nil
 }

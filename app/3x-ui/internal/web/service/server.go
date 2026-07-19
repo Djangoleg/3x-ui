@@ -4,11 +4,13 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -233,7 +235,7 @@ func (s *ServerService) isFail2banInstalled() bool {
 		return s.fail2banInstalled
 	}
 
-	err := exec.Command("fail2ban-client", "-h").Run()
+	err := exec.CommandContext(context.Background(), "fail2ban-client", "-h").Run()
 	s.fail2banInstalled = err == nil
 	s.fail2banCheckedAt = time.Now()
 	return s.fail2banInstalled
@@ -351,7 +353,11 @@ func getPublicIP(url string) string {
 		Timeout: 3 * time.Second,
 	}
 
-	resp, err := client.Get(url)
+	req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if reqErr != nil {
+		return "N/A"
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "N/A"
 	}
@@ -772,7 +778,11 @@ func (s *ServerService) GetXrayVersions() ([]string, error) {
 		bufferSize = 8192
 	)
 
-	resp, err := s.settingService.NewProxiedHTTPClient(10 * time.Second).Get(XrayURL)
+	req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, XrayURL, nil)
+	if reqErr != nil {
+		return nil, reqErr
+	}
+	resp, err := s.settingService.NewProxiedHTTPClient(10 * time.Second).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -816,7 +826,7 @@ func (s *ServerService) GetXrayVersions() ([]string, error) {
 			continue
 		}
 
-		if major > 26 || (major == 26 && minor > 4) || (major == 26 && minor == 4 && patch >= 25) {
+		if major > 26 || (major == 26 && minor > 6) || (major == 26 && minor == 6 && patch >= 27) {
 			versions = append(versions, release.TagName)
 		}
 	}
@@ -872,7 +882,11 @@ func (s *ServerService) downloadXRay(version string) (string, error) {
 	fileName := fmt.Sprintf("Xray-%s-%s.zip", osName, arch)
 	url := fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/%s/%s", version, fileName)
 	client := s.settingService.NewProxiedHTTPClient(60 * time.Second)
-	resp, err := client.Get(url)
+	req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if reqErr != nil {
+		return "", reqErr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -934,7 +948,11 @@ func (s *ServerService) downloadXRay(version string) (string, error) {
 // fetchXrayDigestSHA256 downloads the .dgst sidecar XTLS publishes next to each
 // release asset and returns the SHA2-256 hex digest it lists.
 func (s *ServerService) fetchXrayDigestSHA256(client *http.Client, dgstURL string) (string, error) {
-	resp, err := client.Get(dgstURL)
+	req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, dgstURL, nil)
+	if reqErr != nil {
+		return "", fmt.Errorf("download xray checksum: %w", reqErr)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download xray checksum: %w", err)
 	}
@@ -1009,7 +1027,7 @@ func (s *ServerService) UpdateXray(version string) error {
 			return err
 		}
 		defer zipFile.Close()
-		if err := os.MkdirAll(filepath.Dir(fileName), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(fileName), 0o755); err != nil {
 			return err
 		}
 		tmpFile, err := os.CreateTemp(filepath.Dir(fileName), ".xray-*")
@@ -1031,7 +1049,7 @@ func (s *ServerService) UpdateXray(version string) error {
 		if n > maxXrayBinaryBytes {
 			return fmt.Errorf("xray binary exceeds %d bytes", maxXrayBinaryBytes)
 		}
-		if err := tmpFile.Chmod(0755); err != nil {
+		if err := tmpFile.Chmod(0o755); err != nil {
 			return err
 		}
 		if err := tmpFile.Close(); err != nil {
@@ -1099,7 +1117,7 @@ func (s *ServerService) GetLogs(count string, level string, syslog string) []str
 		}
 
 		// Use hardcoded command with validated parameters
-		cmd := exec.Command("journalctl", "-u", "x-ui", "--no-pager", "-n", strconv.Itoa(countInt), "-p", level)
+		cmd := exec.CommandContext(context.Background(), "journalctl", "-u", "x-ui", "--no-pager", "-n", strconv.Itoa(countInt), "-p", level)
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		err = cmd.Run()
@@ -1121,8 +1139,8 @@ func (s *ServerService) GetXrayLogs(
 	showBlocked string,
 	showProxy string,
 	freedoms []string,
-	blackholes []string) []LogEntry {
-
+	blackholes []string,
+) []LogEntry {
 	const (
 		Direct = iota
 		Blocked
@@ -1149,12 +1167,12 @@ func (s *ServerService) GetXrayLogs(
 		line := strings.TrimSpace(scanner.Text())
 
 		if line == "" || strings.Contains(line, "api -> api") {
-			//skipping empty lines and api calls
+			// skipping empty lines and api calls
 			continue
 		}
 
 		if filter != "" && !strings.Contains(line, filter) {
-			//applying filter if it's not empty
+			// applying filter if it's not empty
 			continue
 		}
 
@@ -1298,18 +1316,28 @@ func (s *ServerService) GetDb() ([]byte, error) {
 
 // BackupFilename returns the filename for a database backup, named after the
 // panel's address so a downloaded or Telegram-sent backup identifies the server
-// it came from. requestHost is the browser's address: the getDb handler passes
-// c.Request.Host so a panel download is named after whatever address the user
-// reached the panel with, no Listen Domain needed. The Telegram bot has no
-// request and passes "", falling back to the configured Listen Domain (webDomain)
-// and then the public IP. The extension is .dump on PostgreSQL and .db on SQLite;
-// the base falls back to "x-ui" when no address is known.
+// it came from, followed by the current date and time (_YYYY-MM-DD_HHMMSS) so
+// files accumulated in Telegram chat history group by server then sort
+// chronologically and same-day backups stay distinct. requestHost is the
+// browser's address: the getDb handler passes c.Request.Host so a panel download
+// is named after whatever address the user reached the panel with, no Listen
+// Domain needed. The Telegram bot has no request and passes "", falling back to
+// the configured Listen Domain (webDomain) and then the public IP. The extension
+// is .dump on PostgreSQL and .db on SQLite; the base falls back to "x-ui" when
+// no address is known.
 func (s *ServerService) BackupFilename(requestHost string) string {
 	ext := ".db"
 	if database.IsPostgres() {
 		ext = ".dump"
 	}
-	return s.backupHost(requestHost) + ext
+	return s.backupHost(requestHost) + backupDateSuffix(time.Now()) + ext
+}
+
+// backupDateSuffix returns the _YYYY-MM-DD_HHMMSS chronological suffix appended
+// after the host in backup filenames. Uses server-local time for consistency
+// with the timestamp printed in the Telegram backup message body.
+func backupDateSuffix(now time.Time) string {
+	return "_" + now.Format("2006-01-02_150405")
 }
 
 // backupHost picks the address used to name backup files: the browser's request
@@ -1398,44 +1426,26 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 	if database.IsPostgres() {
 		return s.importPostgresDB(file)
 	}
-	// Check if the file is a SQLite database
-	isValidDb, err := database.IsSQLiteDB(file)
+	kind, err := sniffUploadKind(file)
 	if err != nil {
-		return common.NewErrorf("Error checking db file format: %v", err)
+		return common.NewErrorf("Error reading uploaded file: %v", err)
 	}
-	if !isValidDb {
-		return common.NewError("Invalid db file format")
+	switch kind {
+	case importKindSQLiteDB, importKindSQLiteDump:
+	case importKindPgDump:
+		return common.NewError("This file is a PostgreSQL backup; it can only be restored on a panel running PostgreSQL")
+	default:
+		return common.NewError("Invalid file: expected a SQLite database (.db) from Back Up or a SQLite migration dump (.dump)")
 	}
 
-	// Reset the file reader to the beginning
-	_, err = file.Seek(0, 0)
-	if err != nil {
-		return common.NewErrorf("Error resetting file reader: %v", err)
-	}
-
-	// Save the file as a temporary file
 	tempPath := fmt.Sprintf("%s.temp", config.GetDBPath())
 
-	// Remove the existing temporary file (if any)
 	if _, err := os.Stat(tempPath); err == nil {
 		if errRemove := os.Remove(tempPath); errRemove != nil {
 			return common.NewErrorf("Error removing existing temporary db file: %v", errRemove)
 		}
 	}
-
-	// Create the temporary file
-	tempFile, err := os.Create(tempPath)
-	if err != nil {
-		return common.NewErrorf("Error creating temporary db file: %v", err)
-	}
-
-	// Robust deferred cleanup for the temporary file
 	defer func() {
-		if tempFile != nil {
-			if cerr := tempFile.Close(); cerr != nil {
-				logger.Warningf("Warning: failed to close temp file: %v", cerr)
-			}
-		}
 		if _, err := os.Stat(tempPath); err == nil {
 			if rerr := os.Remove(tempPath); rerr != nil {
 				logger.Warningf("Warning: failed to remove temp file: %v", rerr)
@@ -1443,20 +1453,15 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 		}
 	}()
 
-	// Save uploaded file to temporary file
-	if _, err = io.Copy(tempFile, file); err != nil {
-		return common.NewErrorf("Error saving db: %v", err)
+	if err := stageSQLiteUpload(file, kind, tempPath); err != nil {
+		return err
 	}
 
-	// Close temp file before opening via sqlite
-	if err = tempFile.Close(); err != nil {
-		return common.NewErrorf("Error closing temporary db file: %v", err)
-	}
-	tempFile = nil
-
-	// Validate integrity (no migrations / side effects)
 	if err = database.ValidateSQLiteDB(tempPath); err != nil {
 		return common.NewErrorf("Invalid or corrupt db file: %v", err)
+	}
+	if err = database.PrepareSQLiteForMigration(tempPath); err != nil {
+		return common.NewErrorf("This file cannot be imported: %v", err)
 	}
 
 	xrayStopped := true
@@ -1475,6 +1480,19 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 		logger.Warningf("Failed to close existing DB before replacement: %v", errClose)
 	}
 
+	// Registered after the xray-restart defer so it runs first (LIFO): every
+	// error return below leaves a database file at the configured path, and the
+	// restart needs an open pool to build the xray config from it.
+	dbReopened := false
+	defer func() {
+		if dbReopened {
+			return
+		}
+		if errReopen := database.InitDB(config.GetDBPath()); errReopen != nil {
+			logger.Warningf("Failed to reopen the database after import error: %v", errReopen)
+		}
+	}()
+
 	// Backup the current database for fallback
 	fallbackPath := fmt.Sprintf("%s.backup", config.GetDBPath())
 
@@ -1490,15 +1508,6 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 		return common.NewErrorf("Error backing up current db file: %v", err)
 	}
 
-	// Defer fallback cleanup ONLY if everything goes well
-	defer func() {
-		if _, err := os.Stat(fallbackPath); err == nil {
-			if rerr := os.Remove(fallbackPath); rerr != nil {
-				logger.Warningf("Warning: failed to remove fallback file: %v", rerr)
-			}
-		}
-	}()
-
 	// Move temp to DB path
 	if err = os.Rename(tempPath, config.GetDBPath()); err != nil {
 		// Restore from fallback
@@ -1510,19 +1519,30 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 
 	// Open & migrate new DB
 	if err = database.InitDB(config.GetDBPath()); err != nil {
+		// A failed InitDB still holds the imported file open; close before the
+		// rename or Windows refuses to replace it.
+		if errClose := database.CloseDB(); errClose != nil {
+			logger.Warningf("Failed to close the imported DB before restoring fallback: %v", errClose)
+		}
 		if errRename := os.Rename(fallbackPath, config.GetDBPath()); errRename != nil {
 			return common.NewErrorf("Error migrating db and restoring fallback: %v", errRename)
 		}
 		return common.NewErrorf("Error migrating db: %v", err)
 	}
+	dbReopened = true
 
 	s.inboundService.MigrateDB()
 
 	xrayStopped = false
 	if err = s.RestartXrayService(); err != nil {
-		return common.NewErrorf("Imported DB but failed to start Xray: %v", err)
+		return common.NewErrorf("Imported DB but failed to start Xray: %v; the previous database was kept at %s", err, fallbackPath)
 	}
 
+	if _, err := os.Stat(fallbackPath); err == nil {
+		if rerr := os.Remove(fallbackPath); rerr != nil {
+			logger.Warningf("Warning: failed to remove fallback file: %v", rerr)
+		}
+	}
 	return nil
 }
 
@@ -1570,7 +1590,7 @@ func (s *ServerService) exportPostgresDB() ([]byte, error) {
 	if err != nil {
 		return nil, common.NewErrorf("invalid PostgreSQL DSN: %v", err)
 	}
-	cmd := exec.Command(bin, "--format=custom", "--no-owner", "--no-privileges", "--dbname", dbname)
+	cmd := exec.CommandContext(context.Background(), bin, "--format=custom", "--no-owner", "--no-privileges", "--dbname", dbname)
 	cmd.Env = env
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -1581,18 +1601,108 @@ func (s *ServerService) exportPostgresDB() ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func (s *ServerService) importPostgresDB(file multipart.File) error {
-	header := make([]byte, 5)
-	if _, err := file.ReadAt(header, 0); err != nil {
-		return common.NewErrorf("Error reading dump file: %v", err)
+var (
+	pgUnsupportedDumpVersionPattern = regexp.MustCompile(`unsupported version \((\d+\.\d+)\) in file header`)
+	pgToolVersionPattern            = regexp.MustCompile(`\d+(?:\.\d+)+`)
+)
+
+var pgArchiveVersionIntroducedIn = map[string]int{
+	"1.15": 16,
+	"1.16": 17,
+}
+
+// checkPgRestoreCanRead probes the dump with pg_restore --list (reads only the
+// TOC, no database connection) so an unreadable file fails before Xray is stopped.
+func checkPgRestoreCanRead(bin, dumpPath string) error {
+	cmd := exec.CommandContext(context.Background(), bin, "--list", dumpPath)
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if cmd.Run() == nil {
+		return nil
 	}
-	if string(header) != "PGDMP" {
-		return common.NewError("Invalid file: expected a PostgreSQL custom-format dump (.dump) created by this panel's Back Up")
+	return pgRestoreReadFailureError(strings.TrimSpace(stderr.String()), pgRestoreVersion(bin))
+}
+
+func pgRestoreReadFailureError(probeOutput, localVersion string) error {
+	m := pgUnsupportedDumpVersionPattern.FindStringSubmatch(probeOutput)
+	if m == nil {
+		return common.NewErrorf("pg_restore cannot read this dump file: %s", probeOutput)
+	}
+	if localVersion == "" {
+		localVersion = "unknown"
+	}
+	if major, known := pgArchiveVersionIntroducedIn[m[1]]; known {
+		return common.NewErrorf("This backup was created by pg_dump from PostgreSQL %d or newer, but the server's pg_restore is version %s and cannot read it; run 'x-ui pgclient %d' on the server (or upgrade the postgresql-client package to version %d or newer), then retry the import", major, localVersion, major, major)
+	}
+	return common.NewErrorf("This backup was created by a newer pg_dump than the server's pg_restore (version %s) can read; upgrade the postgresql-client package and retry the import", localVersion)
+}
+
+func pgRestoreVersion(bin string) string {
+	out, err := exec.CommandContext(context.Background(), bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return parsePgToolVersion(string(out))
+}
+
+func parsePgToolVersion(versionOutput string) string {
+	return pgToolVersionPattern.FindString(versionOutput)
+}
+
+const (
+	importKindUnknown = iota
+	importKindPgDump
+	importKindSQLiteDB
+	importKindSQLiteDump
+)
+
+// sniffImportKind classifies an uploaded restore file by its leading bytes:
+// a pg_dump custom archive, a raw SQLite database, or a SQLite SQL text dump.
+func sniffImportKind(header []byte) int {
+	if bytes.HasPrefix(header, []byte("PGDMP")) {
+		return importKindPgDump
+	}
+	if bytes.HasPrefix(header, []byte("SQLite format 3\x00")) {
+		return importKindSQLiteDB
+	}
+	text := bytes.TrimLeft(bytes.TrimPrefix(header, []byte("\xef\xbb\xbf")), " \t\r\n")
+	if bytes.HasPrefix(text, []byte("PRAGMA")) || bytes.HasPrefix(text, []byte("BEGIN TRANSACTION")) {
+		return importKindSQLiteDump
+	}
+	return importKindUnknown
+}
+
+func sniffUploadKind(file multipart.File) (int, error) {
+	header := make([]byte, 64)
+	n, err := file.ReadAt(header, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return importKindUnknown, err
 	}
 	if _, err := file.Seek(0, 0); err != nil {
-		return common.NewErrorf("Error resetting file reader: %v", err)
+		return importKindUnknown, err
 	}
+	return sniffImportKind(header[:n]), nil
+}
 
+func (s *ServerService) importPostgresDB(file multipart.File) error {
+	kind, err := sniffUploadKind(file)
+	if err != nil {
+		return common.NewErrorf("Error reading uploaded file: %v", err)
+	}
+	switch kind {
+	case importKindPgDump:
+		return s.restorePostgresDump(file)
+	case importKindSQLiteDB:
+		return s.migrateSQLiteIntoPostgres(file, false)
+	case importKindSQLiteDump:
+		return s.migrateSQLiteIntoPostgres(file, true)
+	default:
+		return common.NewError("Invalid file: expected a PostgreSQL custom-format dump (.dump) from this panel's Back Up, a SQLite database (.db), or a SQLite migration dump")
+	}
+}
+
+func (s *ServerService) restorePostgresDump(file multipart.File) error {
 	bin, err := exec.LookPath("pg_restore")
 	if err != nil {
 		return common.NewError("pg_restore not found on the server; install the postgresql-client package to restore a PostgreSQL database")
@@ -1616,6 +1726,10 @@ func (s *ServerService) importPostgresDB(file multipart.File) error {
 		return common.NewErrorf("Error closing temporary dump file: %v", err)
 	}
 
+	if err := checkPgRestoreCanRead(bin, tempPath); err != nil {
+		return err
+	}
+
 	xrayStopped := true
 	defer func() {
 		if xrayStopped {
@@ -1632,7 +1746,7 @@ func (s *ServerService) importPostgresDB(file multipart.File) error {
 		logger.Warningf("Failed to close existing DB before restore: %v", errClose)
 	}
 
-	cmd := exec.Command(bin,
+	cmd := exec.CommandContext(context.Background(), bin,
 		"--clean", "--if-exists", "--no-owner", "--no-privileges",
 		"--single-transaction", "--dbname", dbname, tempPath,
 	)
@@ -1653,6 +1767,99 @@ func (s *ServerService) importPostgresDB(file multipart.File) error {
 	xrayStopped = false
 	if err := s.RestartXrayService(); err != nil {
 		return common.NewErrorf("Restored DB but failed to start Xray: %v", err)
+	}
+	return nil
+}
+
+func (s *ServerService) migrateSQLiteIntoPostgres(file multipart.File, isSQLDump bool) error {
+	tempDir, err := os.MkdirTemp("", "x-ui-pg-migrate-*")
+	if err != nil {
+		return common.NewErrorf("Error creating temporary folder: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	uploadPath := filepath.Join(tempDir, "upload.db")
+	if isSQLDump {
+		uploadPath = filepath.Join(tempDir, "upload.dump")
+	}
+	if err := saveUploadedFile(file, uploadPath); err != nil {
+		return common.NewErrorf("Error saving uploaded file: %v", err)
+	}
+
+	dbPath := uploadPath
+	if isSQLDump {
+		dbPath = filepath.Join(tempDir, "restored.db")
+		if err := database.RestoreSQLite(uploadPath, dbPath); err != nil {
+			return common.NewErrorf("Error rebuilding a SQLite database from the migration dump: %v", err)
+		}
+	}
+	if err := database.ValidateSQLiteDB(dbPath); err != nil {
+		return common.NewErrorf("Invalid or corrupt db file: %v", err)
+	}
+	if err := database.PrepareSQLiteForMigration(dbPath); err != nil {
+		return common.NewErrorf("This file cannot be imported: %v", err)
+	}
+
+	xrayStopped := true
+	defer func() {
+		if xrayStopped {
+			if errR := s.RestartXrayService(); errR != nil {
+				logger.Warningf("Failed to restart Xray after DB restore error: %v", errR)
+			}
+		}
+	}()
+	if errStop := s.StopXrayService(); errStop != nil {
+		logger.Warningf("Failed to stop Xray before DB restore: %v", errStop)
+	}
+
+	if errClose := database.CloseDB(); errClose != nil {
+		logger.Warningf("Failed to close existing DB before restore: %v", errClose)
+	}
+
+	migrateErr := database.MigrateData(dbPath, config.GetDBDSN())
+
+	if errInit := database.InitDB(config.GetDBPath()); errInit != nil {
+		return common.NewErrorf("Restore finished but reopening the database failed: %v", errInit)
+	}
+	s.inboundService.MigrateDB()
+
+	if migrateErr != nil {
+		return common.NewErrorf("Importing the SQLite data into PostgreSQL failed: %v; the import runs in a single transaction, so the database was left unchanged", migrateErr)
+	}
+
+	xrayStopped = false
+	if err := s.RestartXrayService(); err != nil {
+		return common.NewErrorf("Restored DB but failed to start Xray: %v", err)
+	}
+	return nil
+}
+
+func saveUploadedFile(file multipart.File, dstPath string) error {
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, file); err != nil {
+		dst.Close()
+		return err
+	}
+	return dst.Close()
+}
+
+func stageSQLiteUpload(file multipart.File, kind int, tempPath string) error {
+	if kind == importKindSQLiteDump {
+		dumpPath := tempPath + ".dump"
+		defer os.Remove(dumpPath)
+		if err := saveUploadedFile(file, dumpPath); err != nil {
+			return common.NewErrorf("Error saving migration dump: %v", err)
+		}
+		if err := database.RestoreSQLite(dumpPath, tempPath); err != nil {
+			return common.NewErrorf("Error rebuilding a SQLite database from the migration dump: %v", err)
+		}
+		return nil
+	}
+	if err := saveUploadedFile(file, tempPath); err != nil {
+		return common.NewErrorf("Error saving db: %v", err)
 	}
 	return nil
 }
@@ -1711,7 +1918,7 @@ func (s *ServerService) UpdateGeofile(fileName string) error {
 
 	downloadFile := func(url, destPath string) error {
 		var req *http.Request
-		req, err := http.NewRequest("GET", url, nil)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 		if err != nil {
 			return common.NewErrorf("Failed to create HTTP request for %s: %v", url, err)
 		}
@@ -1808,7 +2015,7 @@ func (s *ServerService) UpdateGeofile(fileName string) error {
 
 func (s *ServerService) GetNewX25519Cert() (any, error) {
 	// Run the command
-	cmd := exec.Command(xray.GetBinaryPath(), "x25519")
+	cmd := exec.CommandContext(context.Background(), xray.GetBinaryPath(), "x25519")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
@@ -1834,7 +2041,7 @@ func (s *ServerService) GetNewX25519Cert() (any, error) {
 
 func (s *ServerService) GetNewmldsa65() (any, error) {
 	// Run the command
-	cmd := exec.Command(xray.GetBinaryPath(), "mldsa65")
+	cmd := exec.CommandContext(context.Background(), xray.GetBinaryPath(), "mldsa65")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
@@ -2038,7 +2245,7 @@ func (s *ServerService) GetRemoteCertHash(server string) ([]string, error) {
 
 func (s *ServerService) GetNewEchCert(sni string) (any, error) {
 	// Run the command
-	cmd := exec.Command(xray.GetBinaryPath(), "tls", "ech", "--serverName", sni)
+	cmd := exec.CommandContext(context.Background(), xray.GetBinaryPath(), "tls", "ech", "--serverName", sni)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
@@ -2061,7 +2268,7 @@ func (s *ServerService) GetNewEchCert(sni string) (any, error) {
 }
 
 func (s *ServerService) GetNewVlessEnc() (any, error) {
-	cmd := exec.Command(xray.GetBinaryPath(), "vlessenc")
+	cmd := exec.CommandContext(context.Background(), xray.GetBinaryPath(), "vlessenc")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
@@ -2156,7 +2363,7 @@ func (s *ServerService) GetNewUUID() (map[string]string, error) {
 
 func (s *ServerService) GetNewmlkem768() (any, error) {
 	// Run the command
-	cmd := exec.Command(xray.GetBinaryPath(), "mlkem768")
+	cmd := exec.CommandContext(context.Background(), xray.GetBinaryPath(), "mlkem768")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()

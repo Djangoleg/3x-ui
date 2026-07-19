@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { AutoComplete, Button, Divider, Form, Input, InputNumber, Select, Space, Switch } from 'antd';
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import type { FormInstance } from 'antd/es/form';
 import type { NamePath } from 'antd/es/form/interface';
 
 import { RandomUtil } from '@/utils';
+import { activateOnKey } from '@/utils/a11y';
 import { OutboundProtocols, UTLS_FINGERPRINT } from '@/schemas/primitives';
 
 const UTLS_FINGERPRINT_OPTIONS = Object.values(UTLS_FINGERPRINT).map((value) => ({ value, label: value }));
@@ -79,6 +81,8 @@ function defaultTcpMaskSettings(type: string): Record<string, unknown> {
       };
     case 'header-custom':
       return { clients: [], servers: [] };
+    case 'xmc':
+      return { hostname: '', usernames: [], password: RandomUtil.randomLowerAndNum(16) };
     default:
       return {};
   }
@@ -224,6 +228,7 @@ export default function FinalMaskForm({ name, network, protocol, form, showAll =
 }
 
 function TcpMasksList({ base, form }: { base: (string | number)[]; form: FormInstance }) {
+  const { t } = useTranslation();
   return (
     <Form.List name={[...base, 'tcp']}>
       {(fields, { add, remove }) => (
@@ -233,6 +238,7 @@ function TcpMasksList({ base, form }: { base: (string | number)[]; form: FormIns
               type="primary"
               size="small"
               icon={<PlusOutlined />}
+              aria-label={t('add')}
               onClick={() => add({ type: 'fragment', settings: defaultTcpMaskSettings('fragment') })}
             />
           </Form.Item>
@@ -265,12 +271,20 @@ function TcpMaskItem({
   // type change). All Form.Item `name=` use RELATIVE paths within the
   // outer Form.List context.
   const absolutePath = [...listPath, fieldName];
+  const { t } = useTranslation();
 
   return (
     <div>
       <Divider style={{ margin: 0 }}>
         TCP Mask {displayIndex}
-        <DeleteOutlined className="danger-icon" onClick={onRemove} />
+        <DeleteOutlined
+          className="danger-icon"
+          role="button"
+          tabIndex={0}
+          aria-label={t('remove')}
+          onClick={onRemove}
+          onKeyDown={activateOnKey(onRemove)}
+        />
       </Divider>
 
       <Form.Item label="Type" name={[fieldName, 'type']}>
@@ -282,6 +296,7 @@ function TcpMaskItem({
             { value: 'fragment', label: 'Fragment' },
             { value: 'header-custom', label: 'Header Custom' },
             { value: 'sudoku', label: 'Sudoku' },
+            { value: 'xmc', label: 'XMC (Minecraft)' },
           ]}
         />
       </Form.Item>
@@ -359,6 +374,41 @@ function TcpMaskItem({
               />
             );
           }
+          if (type === 'xmc') {
+            return (
+              <>
+                <Form.Item label="Hostname" name={[fieldName, 'settings', 'hostname']}>
+                  <Input placeholder="Server address mimicked in the handshake" />
+                </Form.Item>
+                <Form.Item
+                  label="Usernames"
+                  name={[fieldName, 'settings', 'usernames']}
+                  extra="Player names offered to probes; core defaults to Dream when empty."
+                >
+                  <Select mode="tags" style={{ width: '100%' }} tokenSeparators={[',']} />
+                </Form.Item>
+                <Form.Item label="Password" required>
+                  <Space.Compact block>
+                    <Form.Item
+                      name={[fieldName, 'settings', 'password']}
+                      noStyle
+                      rules={[{ required: true, message: 'Password is required' }]}
+                    >
+                      <Input placeholder="Obfuscation password" style={{ width: 'calc(100% - 32px)' }} />
+                    </Form.Item>
+                    <Button
+                      icon={<ReloadOutlined />}
+                      aria-label={t('regenerate')}
+                      onClick={() => form.setFieldValue(
+                        [...absolutePath, 'settings', 'password'],
+                        RandomUtil.randomLowerAndNum(16),
+                      )}
+                    />
+                  </Space.Compact>
+                </Form.Item>
+              </>
+            );
+          }
           return null;
         }}
       </Form.Item>
@@ -415,12 +465,13 @@ function FragmentRangeList({
   validator?: (rule: unknown, value: unknown) => Promise<void>;
   minItems?: number;
 }) {
+  const { t } = useTranslation();
   return (
     <Form.List name={listName}>
       {(fields, { add, remove }) => (
         <>
           <Form.Item label={label}>
-            <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => add('')} />
+            <Button type="primary" size="small" icon={<PlusOutlined />} aria-label={t('add')} onClick={() => add('')} />
           </Form.Item>
           {fields.map((field, idx) => (
             <Form.Item
@@ -431,8 +482,17 @@ function FragmentRangeList({
             >
               <Input
                 placeholder={placeholder}
-                addonAfter={fields.length > minItems
-                  ? <DeleteOutlined className="danger-icon" onClick={() => remove(field.name)} />
+                suffix={fields.length > minItems
+                  ? (
+                    <DeleteOutlined
+                      className="danger-icon"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={t('remove')}
+                      onClick={() => remove(field.name)}
+                      onKeyDown={activateOnKey(() => remove(field.name))}
+                    />
+                  )
                   : null}
               />
             </Form.Item>
@@ -475,6 +535,7 @@ function HeaderCustomGroups({
   form: FormInstance;
   absoluteSettingsPath: (string | number)[];
 }) {
+  const { t } = useTranslation();
   return (
     <>
       {(['clients', 'servers'] as const).map((groupKey) => (
@@ -486,6 +547,7 @@ function HeaderCustomGroups({
                   type="primary"
                   size="small"
                   icon={<PlusOutlined />}
+                  aria-label={t('add')}
                   onClick={() => addGroup([defaultClientServerItem()])}
                 />
               </Form.Item>
@@ -493,7 +555,14 @@ function HeaderCustomGroups({
                 <div key={group.key}>
                   <Divider style={{ margin: 0 }}>
                     {groupKey === 'clients' ? 'Clients' : 'Servers'} Group {gi + 1}
-                    <DeleteOutlined className="danger-icon" onClick={() => removeGroup(group.name)} />
+                    <DeleteOutlined
+                      className="danger-icon"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={t('remove')}
+                      onClick={() => removeGroup(group.name)}
+                      onKeyDown={activateOnKey(() => removeGroup(group.name))}
+                    />
                   </Divider>
                   <Form.List name={[group.name]}>
                     {(items, { add: addItem, remove: removeItem }) => (
@@ -502,6 +571,7 @@ function HeaderCustomGroups({
                           <Button
                             size="small"
                             icon={<PlusOutlined />}
+                            aria-label={t('add')}
                             onClick={() => addItem(defaultClientServerItem())}
                           />
                         </Form.Item>
@@ -531,6 +601,7 @@ function HeaderCustomGroups({
 function UdpMasksList({
   base, form, isHysteria, isWireguard, network,
 }: { base: (string | number)[]; form: FormInstance; isHysteria: boolean; isWireguard: boolean; network: string }) {
+  const { t } = useTranslation();
   return (
     <Form.List name={[...base, 'udp']}>
       {(fields, { add, remove }) => (
@@ -540,6 +611,7 @@ function UdpMasksList({
               type="primary"
               size="small"
               icon={<PlusOutlined />}
+              aria-label={t('add')}
               onClick={() => {
                 const def = isHysteria || isWireguard ? 'salamander' : 'mkcp-legacy';
                 add({ type: def, settings: defaultUdpMaskSettings(def) });
@@ -578,6 +650,7 @@ function UdpMaskItem({
   onRemove: () => void;
 }) {
   const absolutePath = [...listPath, fieldName];
+  const { t } = useTranslation();
 
   const onTypeChange = (v: string) => {
     form.setFieldValue([...absolutePath, 'settings'], defaultUdpMaskSettings(v));
@@ -605,7 +678,14 @@ function UdpMaskItem({
     <div>
       <Divider style={{ margin: 0 }}>
         UDP Mask {displayIndex}
-        <DeleteOutlined className="danger-icon" onClick={onRemove} />
+        <DeleteOutlined
+          className="danger-icon"
+          role="button"
+          tabIndex={0}
+          aria-label={t('remove')}
+          onClick={onRemove}
+          onKeyDown={activateOnKey(onRemove)}
+        />
       </Divider>
 
       <Form.Item label="Type" name={[fieldName, 'type']}>
@@ -735,6 +815,7 @@ function SalamanderUdpMaskSettings({
   form: FormInstance;
   absolutePath: (string | number)[];
 }) {
+  const { t } = useTranslation();
   const packetSizePath = [...absolutePath, 'settings', 'packetSize'];
   const packetSize = Form.useWatch(packetSizePath, { form, preserve: true });
   const mode = typeof packetSize === 'string' && packetSize.trim() !== '' ? 'gecko' : 'salamander';
@@ -776,6 +857,7 @@ function SalamanderUdpMaskSettings({
           </Form.Item>
           <Button
             icon={<ReloadOutlined />}
+            aria-label={t('regenerate')}
             onClick={() => form.setFieldValue(
               [...absolutePath, 'settings', 'password'],
               RandomUtil.randomLowerAndNum(16),
@@ -810,7 +892,7 @@ function GeckoPacketSizeInput({
   return (
     <Space.Compact block>
       <InputNumber
-        addonBefore="Min"
+        prefix="Min"
         min={GECKO_MIN_PACKET_SIZE}
         max={GECKO_MAX_PACKET_SIZE}
         precision={0}
@@ -820,7 +902,7 @@ function GeckoPacketSizeInput({
         style={{ width: '50%' }}
       />
       <InputNumber
-        addonBefore="Max"
+        prefix="Max"
         min={GECKO_MIN_PACKET_SIZE}
         max={GECKO_MAX_PACKET_SIZE}
         precision={0}
@@ -840,6 +922,7 @@ function UdpHeaderCustom({
   form: FormInstance;
   absoluteSettingsPath: (string | number)[];
 }) {
+  const { t } = useTranslation();
   return (
     <>
       {(['client', 'server'] as const).map((groupKey) => (
@@ -851,6 +934,7 @@ function UdpHeaderCustom({
                   type="primary"
                   size="small"
                   icon={<PlusOutlined />}
+                  aria-label={t('add')}
                   onClick={() => add(defaultUdpClientServerItem())}
                 />
               </Form.Item>
@@ -858,7 +942,14 @@ function UdpHeaderCustom({
                 <div key={item.key}>
                   <Divider style={{ margin: 0 }}>
                     {groupKey === 'client' ? 'Client' : 'Server'} {ci + 1}
-                    <DeleteOutlined className="danger-icon" onClick={() => remove(item.name)} />
+                    <DeleteOutlined
+                      className="danger-icon"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={t('remove')}
+                      onClick={() => remove(item.name)}
+                      onKeyDown={activateOnKey(() => remove(item.name))}
+                    />
                   </Divider>
                   <ItemEditor
                     fieldName={item.name}
@@ -883,6 +974,7 @@ function NoiseItems({
   form: FormInstance;
   absoluteSettingsPath: (string | number)[];
 }) {
+  const { t } = useTranslation();
   return (
     <>
       <Form.Item label="Reset" name={[udpFieldName, 'settings', 'reset']}>
@@ -896,6 +988,7 @@ function NoiseItems({
                 type="primary"
                 size="small"
                 icon={<PlusOutlined />}
+                aria-label={t('add')}
                 onClick={() => add(defaultNoiseItem())}
               />
             </Form.Item>
@@ -903,7 +996,14 @@ function NoiseItems({
               <div key={item.key}>
                 <Divider style={{ margin: 0 }}>
                   Noise {ni + 1}
-                  <DeleteOutlined className="danger-icon" onClick={() => remove(item.name)} />
+                  <DeleteOutlined
+                    className="danger-icon"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('remove')}
+                    onClick={() => remove(item.name)}
+                    onKeyDown={activateOnKey(() => remove(item.name))}
+                  />
                 </Divider>
                 <ItemEditor
                   fieldName={item.name}
@@ -930,6 +1030,7 @@ function ItemEditor({
   delayMode?: 'number' | 'string';
   onRemove?: () => void;
 }) {
+  const { t } = useTranslation();
   const onTypeChange = (v: string) => {
     if (v === 'base64') {
       form.setFieldValue([...absoluteItemPath, 'packet'], RandomUtil.randomBase64());
@@ -1005,6 +1106,7 @@ function ItemEditor({
                   </Form.Item>
                   <Button
                     icon={<ReloadOutlined />}
+                    aria-label={t('regenerate')}
                     onClick={() => form.setFieldValue([...absoluteItemPath, 'packet'], RandomUtil.randomBase64())}
                   />
                 </Space.Compact>

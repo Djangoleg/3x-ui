@@ -72,6 +72,8 @@ export function isInboundMultiUser(record: { protocol: string; settings: unknown
     case 'vless':
     case 'trojan':
     case 'hysteria':
+    case 'mtproto':
+    case 'wireguard':
       return true;
     case 'shadowsocks':
       return isSSMultiUser({ protocol: 'shadowsocks', settings: readSettings(record.settings) });
@@ -81,7 +83,6 @@ export function isInboundMultiUser(record: { protocol: string; settings: unknown
 }
 
 export function showQrCodeMenu(dbInbound: DBInboundRecord): boolean {
-  if (dbInbound.isWireguard) return true;
   if (dbInbound.isSS) {
     return !isSSMultiUser({ protocol: 'shadowsocks', settings: readSettings(dbInbound.settings) });
   }

@@ -7,7 +7,7 @@ import type { InboundOption } from '@/hooks/useClients';
 import { formatInboundLabel } from '@/lib/inbounds/label';
 import type { BulkAttachResult } from '@/schemas/client';
 
-const MULTI_USER_PROTOCOLS = new Set(['vmess', 'vless', 'trojan', 'hysteria', 'shadowsocks']);
+const MULTI_USER_PROTOCOLS = new Set(['vmess', 'vless', 'trojan', 'hysteria', 'shadowsocks', 'wireguard', 'mtproto']);
 
 interface BulkAttachInboundsModalProps {
   open: boolean;
@@ -81,7 +81,7 @@ export default function BulkAttachInboundsModal({
           {t('pages.clients.attachToInboundsDesc', { count })}
         </Typography.Paragraph>
         {targetOptions.length === 0 ? (
-          <Alert type="info" showIcon message={t('pages.clients.attachToInboundsNoTargets')} />
+          <Alert type="info" showIcon title={t('pages.clients.attachToInboundsNoTargets')} />
         ) : (
           <>
             <SelectAllClearButtons
